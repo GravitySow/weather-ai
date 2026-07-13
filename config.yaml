@@ -1,0 +1,40 @@
+name: Weather AI
+version: "1.0.2"
+slug: weather_ai
+description: Rain warning API using the trained local weather model.
+url: "https://local/weather-ai"
+arch:
+  - amd64
+  - aarch64
+startup: services
+boot: auto
+init: false
+homeassistant_api: true
+ports:
+  8000/tcp: 8000
+ports_description:
+  8000/tcp: Weather AI API
+options:
+  model_kind: xgb
+  db_host: core-mariadb
+  db_port: 3306
+  db_user: ""
+  db_password: ""
+  db_name: weather_ai
+  telegram_bot_token: ""
+  telegram_chat_id: ""
+  weather_lat: "13.8591"
+  weather_lon: "100.5217"
+  weather_tz: "Asia/Bangkok"
+schema:
+  model_kind: list(xgb|rf)
+  db_host: str?
+  db_port: port?
+  db_user: str?
+  db_password: password?
+  db_name: str?
+  telegram_bot_token: password?
+  telegram_chat_id: str?
+  weather_lat: str?
+  weather_lon: str?
+  weather_tz: str?

@@ -1,0 +1,11 @@
+pandas
+numpy
+scikit-learn==1.8.0
+xgboost
+joblib
+fastapi
+uvicorn[standard]
+pydantic
+pymysql
+requests
+Pillow

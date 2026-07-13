@@ -1,0 +1,16 @@
+# Large model files used by the addon — downloaded from GitHub Releases at build
+# time instead of being committed (see build.yaml / Dockerfile)
+weather_rf_model_5m.joblib
+weather_rf_model_10m.joblib
+weather_rf_model_30m.joblib
+weather_temp_model_30m.joblib
+
+# Not referenced by the addon Dockerfile at all — leftover from the main project
+weather_rf_model.joblib
+weather_xgb_model.joblib
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env

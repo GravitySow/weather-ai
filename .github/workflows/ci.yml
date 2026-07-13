@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    name: Validate addon config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint config.yaml / build.yaml
+        run: |
+          python3 -c "
+          import yaml
+          yaml.safe_load(open('config.yaml'))
+          yaml.safe_load(open('build.yaml'))
+          print('config.yaml / build.yaml are valid YAML')
+          "
+
+  build:
+    name: Build (${{ matrix.arch }})
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      # --test builds the image only, it never pushes anywhere. Home Assistant's
+      # own Supervisor is what actually builds+installs this addon on the user's
+      # HA host once they add this repo — see README for that setup.
+      - name: Build ${{ matrix.arch }} addon image (test only, no push)
+        uses: home-assistant/builder@master
+        with:
+          args: |
+            --test \
+            --${{ matrix.arch }} \
+            --target /github/workspace

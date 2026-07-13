@@ -1,0 +1,138 @@
+type: sections
+title: Weather AI
+path: weather-ai
+max_columns: 4
+
+sections:
+  - type: grid
+    cards:
+
+      - type: markdown
+        content: >
+          {% set hi = states('sensor.weather_ai_heat_index') %}
+          {% set comfort = state_attr('sensor.weather_ai_heat_index','comfort_level') %}
+
+          {% if is_state('binary_sensor.weather_ai_raining_now','on') %}
+          ## 🌧️ กำลังมีฝนตก
+          {% elif is_state('binary_sensor.weather_ai_rain_alert','on') %}
+          ## ⚠️ คาดว่าฝนจะตกใน {{ state_attr('binary_sensor.weather_ai_rain_alert','next_rain_alert_horizon') }}
+          {% else %}
+          ## ☀️ ไม่มีฝน
+          {% endif %}
+
+          ### {{ states('sensor.weather_ai_temperature') }}°C · 💧{{ states('sensor.weather_ai_humidity') }}% · 🥵 HI {{ hi }}°C ({{ comfort }})
+
+          <sub>อัปเดต {{ as_timestamp(states.sensor.weather_ai_temperature.last_updated) | timestamp_custom('%H:%M:%S') }}</sub>
+
+      - type: horizontal-stack
+        cards:
+          - type: gauge
+            entity: sensor.weather_ai_rain_probability_5m
+            name: ฝน 5 นาที
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 30
+              red: 60
+
+          - type: gauge
+            entity: sensor.weather_ai_rain_probability_10m
+            name: ฝน 10 นาที
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 30
+              red: 60
+
+          - type: gauge
+            entity: sensor.weather_ai_rain_probability_30m
+            name: ฝน 30 นาที
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 30
+              red: 60
+
+      - type: glance
+        title: สภาพอากาศตอนนี้
+        columns: 4
+        entities:
+          - entity: sensor.weather_ai_temperature
+            icon: mdi:thermometer
+            name: อุณหภูมิ
+
+          - entity: sensor.weather_ai_humidity
+            icon: mdi:water-percent
+            name: ความชื้น
+
+          - entity: sensor.weather_ai_pressure
+            icon: mdi:gauge
+            name: ความกดอากาศ
+
+          - entity: sensor.weather_ai_heat_index
+            icon: mdi:sun-thermometer
+            name: Heat Index
+
+      - type: glance
+        title: ความกดอากาศ / จุดน้ำค้าง
+        columns: 3
+        entities:
+          - entity: sensor.weather_ai_dew_point
+            icon: mdi:water-thermometer
+            name: จุดน้ำค้าง
+
+          - entity: sensor.weather_ai_pressure_trend
+            icon: mdi:chart-line
+            name: แนวโน้ม
+
+          - entity: sensor.weather_ai_trend_arrow
+            icon: mdi:trending-up
+            name: ทิศทาง
+
+      - type: entities
+        title: สถานะแจ้งเตือน
+        entities:
+          - entity: binary_sensor.weather_ai_raining_now
+          - entity: binary_sensor.weather_ai_rain_alert
+
+      - type: glance
+        title: เรดาร์ฝน (ทดลอง)
+        columns: 2
+        entities:
+          - entity: sensor.weather_ai_radar_intensity
+            icon: mdi:radar
+            name: ความแรงฝน (เรดาร์)
+
+          - entity: binary_sensor.weather_ai_radar_nearby
+            icon: mdi:weather-pouring
+            name: ฝนใกล้เคียง
+
+      - type: markdown
+        content: >
+          <sub>ข้อมูลเรดาร์จาก [RainViewer](https://www.rainviewer.com) —
+          เรดาร์ยังอยู่ในโหมดทดลอง (แสดงผลเท่านั้น ยังไม่ใช้แจ้งเตือน)</sub>
+
+      - type: history-graph
+        title: Temperature / Humidity (24 ชม.)
+        hours_to_show: 24
+        entities:
+          - sensor.weather_ai_temperature
+          - sensor.weather_ai_humidity
+
+      - type: history-graph
+        title: Rain Probability (24 ชม.)
+        hours_to_show: 24
+        entities:
+          - sensor.weather_ai_rain_probability_5m
+          - sensor.weather_ai_rain_probability_10m
+          - sensor.weather_ai_rain_probability_30m
+
+      - type: history-graph
+        title: Pressure Trend (24 ชม.)
+        hours_to_show: 24
+        entities:
+          - sensor.weather_ai_pressure
+          - sensor.weather_ai_pressure_trend

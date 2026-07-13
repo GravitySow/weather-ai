@@ -1,0 +1,4 @@
+horizon,target_col,xgb_best_threshold,rf_best_threshold,xgb_average_precision,rf_average_precision,xgb_model_file,rf_model_file,xgb_threshold_metrics_file,rf_threshold_metrics_file
+5,target_5m,0.5,0.5,0.8931213201988305,0.892371279294269,weather_xgb_model_5m.joblib,weather_rf_model_5m.joblib,xgb_threshold_metrics_5m.csv,rf_threshold_metrics_5m.csv
+10,target_10m,0.48,0.5,0.8350852959000171,0.844923601826314,weather_xgb_model_10m.joblib,weather_rf_model_10m.joblib,xgb_threshold_metrics_10m.csv,rf_threshold_metrics_10m.csv
+30,target_30m,0.43,0.34,0.7256532830468749,0.7432546137011705,weather_xgb_model_30m.joblib,weather_rf_model_30m.joblib,xgb_threshold_metrics_30m.csv,rf_threshold_metrics_30m.csv
