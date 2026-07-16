@@ -36,7 +36,7 @@ COPY requirements.txt /tmp/requirements.txt
 RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
 
 COPY run.sh /run.sh
-COPY predict_weather_ai.py weather_api.py weather_features_lib.py weather_db.py telegram_notifier.py telegram_bot.py nwp_forecast.py migrate_csv_to_db.py ha_publisher.py radar_nowcast.py /app/
+COPY predict_weather_ai.py weather_api.py weather_features_lib.py weather_db.py telegram_notifier.py telegram_bot.py nwp_forecast.py migrate_csv_to_db.py ha_publisher.py radar_nowcast.py cloud_nowcast.py /app/
 COPY weather_features.joblib weather_thresholds.joblib /app/
 COPY weather_xgb_model_5m.joblib weather_xgb_model_10m.joblib weather_xgb_model_30m.joblib /app/
 

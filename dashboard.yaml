@@ -115,6 +115,24 @@ sections:
           <sub>ข้อมูลเรดาร์จาก [RainViewer](https://www.rainviewer.com) —
           เรดาร์ยังอยู่ในโหมดทดลอง (แสดงผลเท่านั้น ยังไม่ใช้แจ้งเตือน)</sub>
 
+      - type: glance
+        title: เมฆ (ทดลอง)
+        columns: 2
+        entities:
+          - entity: sensor.weather_ai_cloud_cover
+            icon: mdi:cloud
+            name: ปริมาณเมฆ
+
+          - entity: binary_sensor.weather_ai_cloud_rising
+            icon: mdi:cloud-arrow-up
+            name: เมฆก่อตัวเพิ่ม
+
+      - type: markdown
+        content: >
+          <sub>ข้อมูลเมฆจาก [Open-Meteo](https://open-meteo.com) (พยากรณ์จากโมเดล NWP
+          ไม่ใช่ภาพดาวเทียมจริง) — สัญญาณคู่ขนานกับเรดาร์ ยังอยู่ในโหมดทดลอง
+          (แสดงผลเท่านั้น ยังไม่ใช้แจ้งเตือน)</sub>
+
       - type: history-graph
         title: Temperature / Humidity (24 ชม.)
         hours_to_show: 24

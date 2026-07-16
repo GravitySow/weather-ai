@@ -11,6 +11,7 @@ import pandas as pd
 from pandas.errors import PerformanceWarning
 
 from weather_features_lib import build_feature_frame, heat_index_celsius, comfort_level
+import cloud_nowcast
 import radar_nowcast
 import weather_db
 
@@ -226,10 +227,12 @@ def predict(path=None, model_kind=MODEL_KIND):
         )
     )
 
-    # Shadow-mode diagnostic only (see radar_nowcast.py) — purely additive,
-    # does not feed into any_rain_alert / next_rain_alert_horizon / per-horizon
-    # rain_alert above. Never raises; degrades to {"available": False}.
+    # Shadow-mode diagnostic only (see radar_nowcast.py / cloud_nowcast.py) —
+    # purely additive, does not feed into any_rain_alert / next_rain_alert_horizon
+    # / per-horizon rain_alert above. Neither call ever raises; each degrades to
+    # {"available": False}.
     result["radar"] = radar_nowcast.get_radar_signal()
+    result["cloud"] = cloud_nowcast.get_cloud_signal()
 
     return result
 
@@ -265,6 +268,15 @@ def print_human_result(result):
         )
     else:
         print("radar: unavailable (shadow mode, diagnostic only)")
+    cloud = result.get("cloud", {})
+    if cloud.get("available"):
+        print(
+            f"cloud: now={cloud['cloud_cover_now']}% low={cloud['cloud_cover_low_now']}% "
+            f"next_hour={cloud['cloud_cover_next_hour']}% trend_rising={cloud['trend_rising']} "
+            "(shadow mode, diagnostic only)"
+        )
+    else:
+        print("cloud: unavailable (shadow mode, diagnostic only)")
 
     for horizon, prediction in result["predictions"].items():
         status = "RAIN ALERT" if prediction["rain_alert"] else "no rain alert"

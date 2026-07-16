@@ -10,6 +10,8 @@ import os
 
 import requests
 
+import cloud_nowcast
+
 logger = logging.getLogger(__name__)
 
 HA_API_BASE = "http://supervisor/core/api"
@@ -153,5 +155,33 @@ def publish_prediction(prediction):
             {
                 "friendly_name": "Weather AI Radar Rain Nearby",
                 "trend_rising": radar["trend_rising"],
+            },
+        )
+
+    # Shadow-mode diagnostic only (see cloud_nowcast.py) — not wired into any
+    # alert logic. Parallel signal to radar above; NWP-forecast-derived, not an
+    # observed trend. Skip publishing when unavailable so HA shows the entity
+    # as stale rather than a misleading 0/off value.
+    cloud = prediction.get("cloud", {})
+    if cloud.get("available"):
+        _set_state(
+            "sensor.weather_ai_cloud_cover",
+            cloud["cloud_cover_now"],
+            {
+                "friendly_name": "Weather AI Cloud Cover",
+                "state_class": "measurement",
+                "unit_of_measurement": "%",
+                "cloud_cover_low_now": cloud["cloud_cover_low_now"],
+                "cloud_cover_next_hour": cloud["cloud_cover_next_hour"],
+                "trend_rising": cloud["trend_rising"],
+            },
+        )
+        _set_state(
+            "binary_sensor.weather_ai_cloud_rising",
+            "on" if cloud["trend_rising"] else "off",
+            {
+                "friendly_name": "Weather AI Cloud Cover Rising",
+                "cloud_cover_now": cloud["cloud_cover_now"],
+                "overcast": cloud["cloud_cover_now"] >= cloud_nowcast.HIGH_COVER_THRESHOLD,
             },
         )

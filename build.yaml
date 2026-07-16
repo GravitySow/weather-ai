@@ -2,4 +2,4 @@ build_from:
   aarch64: ghcr.io/hassio-addons/debian-base/aarch64:stable
   amd64: ghcr.io/hassio-addons/debian-base/amd64:stable
 args:
-  MODEL_BASE_URL: https://github.com/OWNER/REPO/releases/download/models
+  MODEL_BASE_URL: https://github.com/GravitySow/weather-ai/releases/download/models

@@ -23,8 +23,8 @@ options:
   db_name: weather_ai
   telegram_bot_token: ""
   telegram_chat_id: ""
-  weather_lat: "13.8591"
-  weather_lon: "100.5217"
+  weather_lat: "13.8692387"
+  weather_lon: "100.5180519"
   weather_tz: "Asia/Bangkok"
 schema:
   model_kind: list(xgb|rf)
