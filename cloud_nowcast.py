@@ -18,54 +18,23 @@ Like radar_nowcast.py this is purely additive/diagnostic: published to Home
 Assistant for the user to eyeball via predict_weather_ai.py's
 ``result["cloud"]``, but NOT wired into any_rain_alert / rain_alert /
 Telegram logic.
+
+2026-07-21: this used to make its own separate Open-Meteo request. Now
+shares nwp_forecast._fetch_open_meteo_data()'s single cached fetch (same
+coordinates, same ~15-minute cache window) instead of hitting the API a
+second time per cycle — see nwp_forecast.py's module docstring.
 """
 
 import logging
-import time
 from datetime import datetime
 
-import requests
-
-from nwp_forecast import WEATHER_LAT, WEATHER_LON, WEATHER_TZ
+import nwp_forecast
 
 logger = logging.getLogger(__name__)
-
-OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
-
-# Open-Meteo's underlying NWP models don't refresh faster than ~hourly; a
-# 15-minute TTL keeps us well within that while still picking up a new run
-# promptly, without hitting the API on every ~1/min /reading call.
-_CACHE_TTL_SECONDS = 15 * 60
-
-_HTTP_TIMEOUT_SECONDS = 15
 
 # Cloud cover % at/above which we call it "overcast" for the binary sensor.
 # Exported (no leading underscore) so ha_publisher.py can reuse the same cutoff.
 HIGH_COVER_THRESHOLD = 70
-
-_signal_cache = {"result": None, "computed_at": 0.0}
-
-
-def _fetch_cloud_data():
-    """Return the raw Open-Meteo JSON, or None on any failure. Never raises."""
-    try:
-        response = requests.get(
-            OPEN_METEO_URL,
-            params={
-                "latitude": WEATHER_LAT,
-                "longitude": WEATHER_LON,
-                "timezone": WEATHER_TZ,
-                "forecast_days": 1,
-                "current": "cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high",
-                "hourly": "cloud_cover",
-            },
-            timeout=_HTTP_TIMEOUT_SECONDS,
-        )
-        response.raise_for_status()
-        return response.json()
-    except Exception:
-        logger.exception("Open-Meteo cloud_cover fetch failed")
-        return None
 
 
 def get_cloud_signal():
@@ -83,16 +52,7 @@ def get_cloud_signal():
       }
     """
     try:
-        now = time.monotonic()
-        cached = _signal_cache["result"]
-        if cached is not None and (now - _signal_cache["computed_at"]) < _CACHE_TTL_SECONDS:
-            return cached
-
-        if not WEATHER_LAT or not WEATHER_LON:
-            logger.warning("WEATHER_LAT/WEATHER_LON not set; skipping cloud nowcast")
-            return {"available": False}
-
-        data = _fetch_cloud_data()
+        data = nwp_forecast._fetch_open_meteo_data()
         if not data:
             return {"available": False}
 
@@ -122,7 +82,7 @@ def get_cloud_signal():
             and next_values[-1] > next_values[0]
         )
 
-        result = {
+        return {
             "available": True,
             "cloud_cover_now": cloud_cover_now,
             "cloud_cover_low_now": cloud_cover_low_now,
@@ -130,9 +90,6 @@ def get_cloud_signal():
             "trend_rising": trend_rising,
             "fetch_time": current_time,
         }
-        _signal_cache["result"] = result
-        _signal_cache["computed_at"] = now
-        return result
     except Exception:
         logger.exception("Cloud nowcast signal computation failed")
         return {"available": False}

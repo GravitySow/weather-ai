@@ -77,6 +77,17 @@ sections:
             name: Heat Index
 
       - type: glance
+        title: แนวโน้มฝนระยะยาว
+        columns: 2
+        entities:
+          - entity: sensor.weather_ai_rain_probability_60m
+            icon: mdi:weather-rainy
+            name: ฝน 60 นาที
+          - entity: sensor.weather_ai_rain_probability_120m
+            icon: mdi:weather-rainy
+            name: ฝน 120 นาที
+
+      - type: glance
         title: ความกดอากาศ / จุดน้ำค้าง
         columns: 3
         entities:
@@ -97,6 +108,9 @@ sections:
         entities:
           - entity: binary_sensor.weather_ai_raining_now
           - entity: binary_sensor.weather_ai_rain_alert
+          - entity: binary_sensor.weather_ai_tmd_warning
+          - entity: sensor.weather_ai_tmd_warning_count
+          - entity: sensor.weather_ai_rain_stop_eta
 
       - type: glance
         title: เรดาร์ฝน (ทดลอง)
@@ -114,6 +128,29 @@ sections:
         content: >
           <sub>ข้อมูลเรดาร์จาก [RainViewer](https://www.rainviewer.com) —
           เรดาร์ยังอยู่ในโหมดทดลอง (แสดงผลเท่านั้น ยังไม่ใช้แจ้งเตือน)</sub>
+
+      - type: entities
+        title: ฝนกำลังเข้า (ทดลอง — ยังไม่ผ่านการพิสูจน์ความแม่นยำ)
+        entities:
+          - entity: binary_sensor.weather_ai_radar_arriving
+            name: ฝนกำลังเคลื่อนเข้ามา
+          - type: attribute
+            entity: binary_sensor.weather_ai_radar_arriving
+            attribute: eta_minutes
+            name: คาดถึงใน (นาที)
+          - type: attribute
+            entity: binary_sensor.weather_ai_radar_arriving
+            attribute: motion_kmh
+            name: ความเร็ว (กม./ชม.)
+          - type: attribute
+            entity: binary_sensor.weather_ai_radar_arriving
+            attribute: confidence
+            name: ความเชื่อมั่น
+
+      - type: markdown
+        content: >
+          <sub>ประมาณทิศทาง/ความเร็วฝนจากเรดาร์แล้วคาดเวลาที่จะถึง —
+          ยังไม่ผ่านการ backtest จริง (ดู forecast_scoring.py) ยังไม่ใช้แจ้งเตือน Telegram</sub>
 
       - type: glance
         title: เมฆ (ทดลอง)
@@ -147,6 +184,8 @@ sections:
           - sensor.weather_ai_rain_probability_5m
           - sensor.weather_ai_rain_probability_10m
           - sensor.weather_ai_rain_probability_30m
+          - sensor.weather_ai_rain_probability_60m
+          - sensor.weather_ai_rain_probability_120m
 
       - type: history-graph
         title: Pressure Trend (24 ชม.)

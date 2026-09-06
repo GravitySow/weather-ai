@@ -1,5 +1,5 @@
 name: Weather AI
-version: "1.0.2"
+version: "1.0.6"
 slug: weather_ai
 description: Rain warning API using the trained local weather model.
 url: "https://local/weather-ai"
@@ -15,7 +15,7 @@ ports:
 ports_description:
   8000/tcp: Weather AI API
 options:
-  model_kind: xgb
+  model_kind: rf
   db_host: core-mariadb
   db_port: 3306
   db_user: ""
@@ -26,6 +26,21 @@ options:
   weather_lat: "13.8692387"
   weather_lon: "100.5180519"
   weather_tz: "Asia/Bangkok"
+  nwp_bias_correction_path: ""
+  nwp_temp_interval_path: ""
+  alert_cooldown_seconds: 1800
+  revision_alert_enabled: false
+  revision_alert_cooldown_seconds: 3600
+  revision_poll_seconds: 900
+  ha_source_enabled: false
+  ha_temp_entity: ""
+  ha_humidity_entity: ""
+  ha_pressure_entity: ""
+  ha_rain_entity: ""
+  ha_light_entity: ""
+  ha_poll_seconds: 60
+  ha_stale_after_seconds: 180
+  ha_api_base: ""
 schema:
   model_kind: list(xgb|rf)
   db_host: str?
@@ -38,3 +53,18 @@ schema:
   weather_lat: str?
   weather_lon: str?
   weather_tz: str?
+  nwp_bias_correction_path: str?
+  nwp_temp_interval_path: str?
+  alert_cooldown_seconds: int?
+  revision_alert_enabled: bool?
+  revision_alert_cooldown_seconds: int?
+  revision_poll_seconds: int?
+  ha_source_enabled: bool?
+  ha_temp_entity: str?
+  ha_humidity_entity: str?
+  ha_pressure_entity: str?
+  ha_rain_entity: str?
+  ha_light_entity: str?
+  ha_poll_seconds: int?
+  ha_stale_after_seconds: int?
+  ha_api_base: str?

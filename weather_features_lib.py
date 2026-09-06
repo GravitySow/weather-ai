@@ -51,6 +51,50 @@ def unique(items):
     return list(dict.fromkeys(items))
 
 
+def add_external_nowcast_features(df, features):
+    """Add radar/cloud shadow features with explicit missing-value semantics.
+
+    Older CSV histories do not contain these columns while MariaDB readings
+    do.  Always creating the columns keeps one feature schema for both paths;
+    the ``*_available`` and ``*_missing`` indicators prevent zero-filled
+    legacy rows from being mistaken for a measured clear sky.
+    """
+    specs = {
+        "radar_available": 0.0,
+        "radar_point_intensity": 0.0,
+        "radar_nearby_max_intensity": 0.0,
+        "radar_trend_rising": 0.0,
+        "cloud_available": 0.0,
+        "cloud_cover_now": 0.0,
+        "cloud_cover_low_now": 0.0,
+        "cloud_trend_rising": 0.0,
+    }
+    for column, default in specs.items():
+        if column not in df:
+            df[column] = default
+            continue
+        values = df[column]
+        if values.dtype == object or str(values.dtype) == "boolean":
+            values = values.astype(str).str.lower().map(
+                {"true": 1.0, "false": 0.0, "1": 1.0, "0": 0.0, "yes": 1.0, "no": 0.0}
+            )
+        df[column] = pd.to_numeric(values, errors="coerce").fillna(default)
+
+    for source in ("radar", "cloud"):
+        available = df[f"{source}_available"].fillna(0.0).clip(0.0, 1.0)
+        df[f"{source}_available"] = available
+        df[f"{source}_missing"] = (available <= 0.0).astype(float)
+        features.extend([
+            f"{source}_available",
+            f"{source}_missing",
+        ])
+
+    features.extend([
+        "radar_point_intensity", "radar_nearby_max_intensity", "radar_trend_rising",
+        "cloud_cover_now", "cloud_cover_low_now", "cloud_trend_rising",
+    ])
+
+
 def heat_index_celsius(temp_c, rh):
     """NOAA Rothfusz heat index, coefficients adapted for Celsius / %RH.
 
@@ -94,9 +138,12 @@ def build_feature_frame(df):
     Expects df with cleaned, numeric, de-duplicated, time-sorted columns:
     timestamp, temp, humidity, pressure, rain_flag.
     """
-    # Split feature windows at large gaps so rolling values do not cross missing data.
+    # Row-based lags assume one observation per minute. Allow timestamp jitter,
+    # but restart after missing or duplicated samples instead of silently making
+    # a "30m" feature span 31+ minutes (or less than 30 minutes).
     time_gap = df["timestamp"].diff()
-    df["segment_id"] = time_gap.gt(pd.Timedelta(minutes=2)).cumsum()
+    irregular = time_gap.lt(pd.Timedelta(seconds=30)) | time_gap.gt(pd.Timedelta(seconds=90))
+    df["segment_id"] = irregular.cumsum()
     group = df.groupby("segment_id", group_keys=False)
 
     features = ["temp", "humidity", "pressure"]
@@ -138,6 +185,9 @@ def build_feature_frame(df):
     df["day_sin"] = np.sin(day_radian)
     df["day_cos"] = np.cos(day_radian)
     features.extend(["hour_sin", "hour_cos", "day_sin", "day_cos"])
+
+    # --- External nowcast context (optional in legacy CSV, persisted in DB) ---
+    add_external_nowcast_features(df, features)
 
     # --- Augmented physical features (improve longer lead time, esp. 30m) ---
     # Longer pressure / humidity tendency: slow synoptic-scale trend signal.

@@ -5,26 +5,30 @@ import logging
 import os
 import warnings
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 import joblib
 import pandas as pd
 from pandas.errors import PerformanceWarning
 
 from weather_features_lib import build_feature_frame, heat_index_celsius, comfort_level
+from rain_probability import enforce_horizon_coherence
 import cloud_nowcast
+import radar_advection
 import radar_nowcast
 import weather_db
 
 logger = logging.getLogger(__name__)
 
 RAIN_THRESHOLD = 0.10
-PREDICTION_WINDOWS = [5, 10, 30]
+PREDICTION_WINDOWS = [5, 10, 30, 60, 120]
 # Temperature forecast only beats the persistence baseline at 30m (5m/10m
 # models were dropped: min_samples_leaf=2 trees ballooned to ~600MB each in
 # RAM for zero accuracy gain over persistence).
 TEMP_FORECAST_WINDOWS = [30]
 MODEL_KIND = "rf"  # Options: "xgb", "rf"
 DATA_DIR = os.getenv("WEATHER_DATA_DIR", "dataset")
+MAX_OBSERVATION_AGE_SECONDS = 180
 
 # Below this magnitude (hPa over the last hour) the pressure is called "steady"
 # rather than rising/falling — arbitrary but keeps the arrow from flickering
@@ -46,6 +50,8 @@ warnings.simplefilter(action="ignore", category=PerformanceWarning)
 # cheap. Safe because a running process never needs a different model file
 # for the same path; retraining requires a process restart to pick up.
 _MODEL_CACHE = {}
+_MODEL_METADATA_CACHE = {}
+_HISTORY_COLUMNS = ["timestamp", "temp", "humidity", "pressure", "rain_flag"]
 
 
 def _cached_joblib_load(path):
@@ -54,8 +60,102 @@ def _cached_joblib_load(path):
     return _MODEL_CACHE[path]
 
 
+def _load_bundle_metadata(model_dir):
+    """Read optional bundle provenance once without breaking legacy bundles."""
+    key = str(Path(model_dir).resolve()) if model_dir else "<legacy-cwd>"
+    if key in _MODEL_METADATA_CACHE:
+        return _MODEL_METADATA_CACHE[key]
+
+    metadata = {}
+    manifest_path = Path(model_dir or ".") / "evaluation.json"
+    try:
+        if manifest_path.exists():
+            metadata = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        logger.warning("Could not read model bundle metadata from %s", manifest_path)
+
+    bundle_name = Path(model_dir).name if model_dir else "legacy-cwd"
+    metadata = {
+        "schema_version": metadata.get("schema_version"),
+        "created_at_utc": metadata.get("created_at_utc"),
+        "model_version": metadata.get("model_version") or (
+            f"{bundle_name}:{metadata.get('created_at_utc')}"
+            if metadata.get("created_at_utc") else f"legacy:{bundle_name}"
+        ),
+        "feature_count": metadata.get("feature_count"),
+        "required_runtime_horizons": metadata.get("required_runtime_horizons"),
+    }
+    _MODEL_METADATA_CACHE[key] = metadata
+    return metadata
+
+
+def _feature_coverage(df):
+    """Fraction of the 120-minute continuous context available at the tail."""
+    if df.empty:
+        return 0.0
+    if "segment_id" in df:
+        latest_segment = df.loc[df["segment_id"] == df["segment_id"].iloc[-1]]
+        return float(min(1.0, len(latest_segment) / 120.0))
+    return 1.0
+
+
+def _confidence_fields(df, newest_timestamp, live):
+    coverage = _feature_coverage(df)
+    age_seconds = None
+    age_factor = 1.0
+    if live:
+        age_seconds = float((pd.Timestamp.now(tz="UTC") - newest_timestamp).total_seconds())
+        age_factor = max(0.0, min(1.0, 1.0 - max(age_seconds, 0.0) / MAX_OBSERVATION_AGE_SECONDS))
+    confidence = float(max(0.0, min(1.0, coverage * age_factor)))
+    if confidence >= 0.85:
+        level = "high"
+    elif confidence >= 0.55:
+        level = "medium"
+    else:
+        level = "low"
+    reason = "continuous sensor context"
+    if coverage < 1.0:
+        reason = "short or interrupted sensor context"
+    elif live and age_factor < 1.0:
+        reason = "latest sensor observation is aging"
+    return {
+        "data_age_seconds": age_seconds,
+        "feature_coverage": coverage,
+        "data_confidence": confidence,
+        "confidence_level": level,
+        "confidence_reason": reason,
+    }
+
+
+def _empty_history_frame():
+    return pd.DataFrame(columns=_HISTORY_COLUMNS)
+
+
+def _merge_weather_history(*frames):
+    """Combine usable history frames into one UTC, time-sorted stream.
+
+    CSV is supplied before DB by the caller, so the DB's more recently
+    persisted copy wins when both sources contain the same timestamp.
+    """
+    non_empty = [frame for frame in frames if frame is not None and not frame.empty]
+    if not non_empty:
+        return _empty_history_frame()
+
+    df = pd.concat(non_empty, ignore_index=True)
+    # Both loaders already normalize timestamps, but keeping the merge boundary
+    # defensive prevents an injected/mixed source from reintroducing a
+    # tz-naive/tz-aware sort failure.
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True, format="mixed")
+    df = df.dropna(subset=["timestamp"])
+    return (
+        df.sort_values("timestamp", kind="stable")
+        .drop_duplicates(subset=["timestamp"], keep="last")
+        .reset_index(drop=True)
+    )
+
+
 def load_weather_data(path=None, max_files=None):
-    if path:
+    if path is not None:
         csv_files = [path]
     else:
         csv_files = sorted(glob.glob(os.path.join(DATA_DIR, "*.csv")))
@@ -70,46 +170,44 @@ def load_weather_data(path=None, max_files=None):
     df = pd.concat((pd.read_csv(file) for file in csv_files), ignore_index=True)
     df = df[df["timestamp"].astype(str).str.lower() != "timestamp"]
 
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    # CSV history can contain a mix of old naive values and current ISO-8601
+    # UTC values.  Normalize both forms before sorting or merging with MariaDB.
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True, format="mixed")
     df = df.dropna(subset=["timestamp"])
 
     for col in ["temp", "humidity", "pressure", "rain_flag"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.dropna(subset=["temp", "humidity", "pressure", "rain_flag"])
 
-    return (
-        df.sort_values("timestamp")
-        .drop_duplicates(subset=["timestamp"], keep="last")
-        .reset_index(drop=True)
-    )
+    return _merge_weather_history(df)
 
 
 def load_recent_from_db(lookback_minutes=130):
     """Supplement local CSV history with the same recent window from
-    MariaDB — CSV can be thin right after an add-on reinstall (fresh /data
-    volume) while the DB (a separate, longer-lived service) still has it.
-    Returns an empty DataFrame on any DB failure; CSV-only remains the
-    safe fallback, matching this project's existing DB-failure posture."""
+    MariaDB — CSV can be thin or absent right after an add-on reinstall
+    (fresh /data volume) while the DB (a separate, longer-lived service)
+    still has it. Returns an empty DataFrame on any DB failure; CSV-only
+    remains the safe fallback, matching this project's existing DB-failure
+    posture."""
     try:
         end = datetime.now(timezone.utc) + timedelta(minutes=1)
         start = end - timedelta(minutes=lookback_minutes)
         rows = weather_db.get_readings(start, end)
         if not rows:
-            return pd.DataFrame(columns=["timestamp", "temp", "humidity", "pressure", "rain_flag"])
+            return _empty_history_frame()
         db_df = pd.DataFrame(rows).rename(columns={"reading_time": "timestamp"})
-        # weather_db stores reading_time as naive UTC (see
-        # _normalize_reading_time); pandas parses it back tz-naive, while the
-        # CSV-sourced timestamps are tz-aware (ISO strings always carry
-        # +00:00). Concat + sort_values on mixed tz-aware/naive columns raises
-        # "Cannot compare tz-naive and tz-aware timestamps" — localize here so
-        # both sides match before load_weather_data's data is combined with this.
-        db_df["timestamp"] = pd.to_datetime(db_df["timestamp"], errors="coerce").dt.tz_localize("UTC")
+        # MariaDB normally returns naive UTC DATETIME values, but migrations or
+        # mocks may mix those with ISO values that carry an offset.  ``utc=True``
+        # handles both without assuming every value is tz-naive.
+        db_df["timestamp"] = pd.to_datetime(db_df["timestamp"], errors="coerce", utc=True, format="mixed")
         for col in ["temp", "humidity", "pressure", "rain_flag"]:
             db_df[col] = pd.to_numeric(db_df[col], errors="coerce")
-        return db_df.dropna(subset=["timestamp", "temp", "humidity", "pressure", "rain_flag"])
+        return _merge_weather_history(
+            db_df.dropna(subset=["timestamp", "temp", "humidity", "pressure", "rain_flag"])
+        )
     except Exception:
         logger.exception("Could not load recent readings from DB; continuing with CSV only")
-        return pd.DataFrame(columns=["timestamp", "temp", "humidity", "pressure", "rain_flag"])
+        return _empty_history_frame()
 
 
 def load_threshold(thresholds, model_kind, horizon):
@@ -119,24 +217,40 @@ def load_threshold(thresholds, model_kind, horizon):
     return horizon_info[f"{model_kind}_best_threshold"]
 
 
-def predict(path=None, model_kind=MODEL_KIND):
-    trained_features = _cached_joblib_load("weather_features.joblib")
-    thresholds = _cached_joblib_load("weather_thresholds.joblib")
+def predict(path=None, model_kind=MODEL_KIND, model_dir=None):
+    model_dir = model_dir or os.getenv("WEATHER_MODEL_DIR")
 
-    # Feature engineering only looks back 120 minutes at most (see
-    # weather_features_lib.py) — loading the whole multi-day history here was
-    # pure waste that grew worse every day as dataset/*.csv accumulated.
-    # 2 daily files always covers the lookback, even right after midnight.
-    df = load_weather_data(path, max_files=2)
+    def model_path(name):
+        return os.path.join(model_dir, name) if model_dir else name
 
-    db_df = load_recent_from_db()
-    if not db_df.empty:
-        df = pd.concat([df, db_df], ignore_index=True)
-        df = (
-            df.sort_values("timestamp")
-            .drop_duplicates(subset=["timestamp"], keep="last")
-            .reset_index(drop=True)
-        )
+    trained_features = _cached_joblib_load(model_path("weather_features.joblib"))
+    thresholds = _cached_joblib_load(model_path("weather_thresholds.joblib"))
+    bundle_metadata = _load_bundle_metadata(model_dir)
+
+    # An explicit CSV is a historical replay.  It must be isolated from the
+    # live DB; otherwise it silently incorporates present-day observations and
+    # invalidates backtests.  Live inference instead uses whichever of the
+    # latest CSV files and recent DB history is available.
+    if path is not None:
+        df = load_weather_data(path, max_files=2)
+    else:
+        try:
+            csv_df = load_weather_data(max_files=2)
+        except FileNotFoundError:
+            csv_df = _empty_history_frame()
+
+        db_df = load_recent_from_db()
+        df = _merge_weather_history(csv_df, db_df)
+        if df.empty:
+            raise FileNotFoundError(
+                f"No usable weather history in {DATA_DIR}/*.csv or the recent database window."
+            )
+
+    if path is None:
+        newest = df["timestamp"].iloc[-1]
+        age_seconds = (pd.Timestamp.now(tz="UTC") - newest).total_seconds()
+        if age_seconds > MAX_OBSERVATION_AGE_SECONDS or age_seconds < -60:
+            raise ValueError(f"Latest observation is not current ({newest}); cannot issue a live forecast")
 
     df, _group, built_features = build_feature_frame(df)
 
@@ -152,6 +266,14 @@ def predict(path=None, model_kind=MODEL_KIND):
         )
 
     latest = usable_df.tail(1)
+    newest_timestamp = df["timestamp"].iloc[-1]
+    latest_usable_timestamp = latest["timestamp"].iloc[0]
+    if latest_usable_timestamp != newest_timestamp:
+        raise ValueError(
+            "Cannot predict from stale history: the newest observation "
+            f"({newest_timestamp}) lacks the continuous history required to build all features. "
+            "Need at least about 120 minutes of continuous data ending at the newest observation."
+        )
     X_latest = latest[trained_features]
     timestamp = latest["timestamp"].iloc[0]
     rain_now_value = float(latest["rain_flag"].iloc[0])
@@ -168,6 +290,12 @@ def predict(path=None, model_kind=MODEL_KIND):
     result = {
         "timestamp": str(timestamp),
         "model": model_kind,
+        "model_version": bundle_metadata["model_version"],
+        "bundle_schema_version": bundle_metadata["schema_version"],
+        "bundle_created_at_utc": bundle_metadata["created_at_utc"],
+        "feature_count": len(trained_features),
+        "required_runtime_horizons": bundle_metadata["required_runtime_horizons"]
+        or PREDICTION_WINDOWS,
         "temp": temp_now,
         "humidity": humidity_now,
         "pressure": float(latest["pressure"].iloc[0]),
@@ -181,11 +309,28 @@ def predict(path=None, model_kind=MODEL_KIND):
         "predictions": {},
         "temp_forecast": {},
     }
+    result.update(_confidence_fields(df, newest_timestamp, live=path is None))
 
-    for horizon in PREDICTION_WINDOWS:
-        model = _cached_joblib_load(f"weather_{model_kind}_model_{horizon}m.joblib")
+    configured_horizons = sorted({int(item["horizon"]) for item in thresholds.get("horizons", [])})
+    horizons = [horizon for horizon in PREDICTION_WINDOWS if horizon in configured_horizons]
+    if not horizons:
+        raise ValueError("Model bundle has no supported prediction horizons")
+    raw_probabilities = {}
+    for horizon in horizons:
+        model = _cached_joblib_load(model_path(f"weather_{model_kind}_model_{horizon}m.joblib"))
+        raw_probabilities[f"{horizon}m"] = float(model.predict_proba(X_latest)[0][1])
+    postprocessing = thresholds.get("probability_postprocessing", "none")
+    if postprocessing == "isotonic_horizons":
+        probabilities = enforce_horizon_coherence(raw_probabilities)
+    elif postprocessing == "none":
+        probabilities = raw_probabilities
+    else:
+        raise ValueError(f"Unsupported probability postprocessing: {postprocessing}")
+    result["probability_postprocessing"] = postprocessing
+
+    for horizon in horizons:
         threshold = load_threshold(thresholds, model_kind, horizon)
-        proba = model.predict_proba(X_latest)[0][1]
+        proba = probabilities[f"{horizon}m"]
         will_rain = int(proba >= threshold)
         advance_alert = bool(will_rain and not is_raining_now)
 
@@ -196,9 +341,11 @@ def predict(path=None, model_kind=MODEL_KIND):
             "threshold": float(threshold),
             "suppressed_by_rain_now": bool(will_rain and is_raining_now),
         }
+        if postprocessing != "none":
+            result["predictions"][f"{horizon}m"]["unadjusted_probability"] = raw_probabilities[f"{horizon}m"]
 
     for horizon in TEMP_FORECAST_WINDOWS:
-        temp_model_path = f"weather_temp_model_{horizon}m.joblib"
+        temp_model_path = model_path(f"weather_temp_model_{horizon}m.joblib")
         if not os.path.exists(temp_model_path):
             continue
         temp_model = _cached_joblib_load(temp_model_path)
@@ -227,12 +374,19 @@ def predict(path=None, model_kind=MODEL_KIND):
         )
     )
 
-    # Shadow-mode diagnostic only (see radar_nowcast.py / cloud_nowcast.py) —
-    # purely additive, does not feed into any_rain_alert / next_rain_alert_horizon
-    # / per-horizon rain_alert above. Neither call ever raises; each degrades to
+    # Shadow-mode diagnostic only (see radar_nowcast.py / cloud_nowcast.py /
+    # radar_advection.py) — purely additive, does not feed into
+    # any_rain_alert / next_rain_alert_horizon / per-horizon rain_alert
+    # above. None of these calls ever raise; each degrades to
     # {"available": False}.
-    result["radar"] = radar_nowcast.get_radar_signal()
-    result["cloud"] = cloud_nowcast.get_cloud_signal()
+    if path is not None:
+        # Present-day radar/cloud must not be attached to a historical replay.
+        for source in ("radar", "cloud", "radar_advection"):
+            result[source] = {"available": False, "reason": "historical_replay"}
+    else:
+        result["radar"] = radar_nowcast.get_radar_signal()
+        result["cloud"] = cloud_nowcast.get_cloud_signal()
+        result["radar_advection"] = radar_advection.get_advection_signal()
 
     return result
 
@@ -291,6 +445,7 @@ def print_human_result(result):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Predict rain alerts from saved weather models.")
     parser.add_argument("--csv", default=None, help="Optional CSV path. Defaults to dataset/*.csv.")
+    parser.add_argument("--model-dir", default=None, help="Complete model bundle directory (or WEATHER_MODEL_DIR)")
     parser.add_argument(
         "--model",
         default=MODEL_KIND,
@@ -300,7 +455,7 @@ if __name__ == "__main__":
     parser.add_argument("--json", action="store_true", help="Print one-line JSON for Node-RED.")
     args = parser.parse_args()
 
-    prediction_result = predict(args.csv, args.model)
+    prediction_result = predict(args.csv, args.model, args.model_dir)
     if args.json:
         print(json.dumps(prediction_result, ensure_ascii=False))
     else:

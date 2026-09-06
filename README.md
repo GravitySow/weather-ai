@@ -35,7 +35,7 @@ CI validates the build; Supervisor picks up the bump and (auto-)updates the addo
 ---
 
 FastAPI service for receiving weather sensor readings, saving them to daily CSV files
-and (optionally) a MariaDB database, returning 5m/10m/30m rain predictions from the
+and (optionally) a MariaDB database, returning 5m/10m/30m/60m/120m rain predictions from the
 trained model, and pushing rain-alert notifications to Telegram when the rain state
 changes.
 
@@ -57,6 +57,10 @@ MQTT broker needed):
 - `sensor.weather_ai_rain_probability_5m` / `_10m` / `_30m` (%, attributes: `rain_alert`, `threshold`)
 - `binary_sensor.weather_ai_raining_now`
 - `binary_sensor.weather_ai_rain_alert` (attributes: `next_rain_alert_horizon`, `alert_message`)
+- `sensor.weather_ai_tmd_warning_count` / `binary_sensor.weather_ai_tmd_warning` —
+  area-matched official TMD CAP warnings (source/severity/expiry attributes)
+- `sensor.weather_ai_rain_stop_eta` — experimental ETA and p20–p80 remaining-minute
+  interval; becomes `unavailable` when history is stale or insufficient
 
 A ready-made dashboard is in `dashboard.yaml` (HA's `sections` view type, requires HA
 2024.9+) — a hero card (current temp/humidity/heat index + rain status in Thai), gauges for
@@ -77,7 +81,40 @@ editor**, and paste in the contents of `dashboard.yaml`.
 
 Rain alerts are sent to Telegram only on state changes (rain starts/stops, a new
 rain-alert horizon triggers, or an alert clears) — not on every reading — to avoid
-spamming the chat every minute.
+spamming the chat every minute. `alert_cooldown_seconds` adds a durable per-event
+cooldown across restarts. NWP bias correction is opt-in: set
+`nwp_bias_correction_path` to a reviewed JSON artifact; the API keeps both raw
+and corrected hourly temperatures. For calibrated temperature ranges, set
+`nwp_temp_interval_path` to an artifact produced by `train_temperature_intervals.py`
+from a chronological holdout; the API leaves the interval null when no compatible
+artifact is configured. `/forecast` also exposes an experimental rain-stop estimate
+when at least three completed local rain events are available, and reads active
+area-matched warnings from the TMD CAP feed with source/expiry metadata.
+Revision messages can be sent proactively only after setting
+`revision_alert_enabled` to `true`; the default is off and the cooldown/poll
+interval are controlled by `revision_alert_cooldown_seconds` and
+`revision_poll_seconds`.
+
+### ดึงเซนเซอร์จาก Home Assistant โดยตรง (14.6)
+
+โหมดนี้ปิดไว้เป็นค่าเริ่มต้นเพื่อป้องกันการอ่าน entity ผิดตัว เปิดใช้โดยตั้ง
+`ha_source_enabled: true` แล้วระบุ entity ต้นทางอย่างน้อย 3 ตัว:
+`ha_temp_entity`, `ha_humidity_entity`, `ha_pressure_entity` (เช่น
+`sensor.outdoor_temperature`). ระบุ `ha_rain_entity` และ `ha_light_entity` ได้ถ้ามี
+เซนเซอร์เหล่านั้นด้วย; ห้ามใช้ entity ที่ขึ้นต้นด้วย `sensor.weather_ai_` หรือ
+`binary_sensor.weather_ai_` เพราะเป็น output ของ add-on เองและจะทำให้เกิด feedback loop.
+
+Supervisor จะส่ง `SUPERVISOR_TOKEN` ให้อัตโนมัติเมื่อ `homeassistant_api: true` และ
+add-on จะอ่านแบบ read-only จาก `/states/<entity_id>` ทุก `ha_poll_seconds` วินาที
+(ค่าเริ่มต้น 60) ตรวจเวลาของข้อมูลไม่ให้เกิน `ha_stale_after_seconds` (180 วินาที),
+แปลง °F/K เป็น °C และ Pa/kPa/inHg เป็น hPa, พร้อมตัดค่า `unknown`/`unavailable`.
+การอ่านซ้ำ observation เดิมจะถูก deduplicate ก่อนเข้า pipeline เดิมของ `/reading`.
+ดูสถานะได้ที่ `GET /ha-source/status` หรือ `GET /health`.
+
+การรันแบบ Docker Compose ภายนอก Supervisor ให้ตั้ง `HA_API_BASE` เป็น URL ของ Core API
+และ `HA_TOKEN` เป็น long-lived token ผ่าน environment/secret เท่านั้น (ไม่ใส่ token ใน
+`config.yaml` และระบบจะไม่แสดง token ใน log หรือ status). หากไม่กำหนด entity ครบหรือ
+ข้อมูล stale ระบบจะคงข้อมูลเดิมไว้และรอรอบถัดไป; `POST /reading` ยังใช้เป็น fallback ได้เสมอ.
 
 To backfill existing CSV history into MariaDB, run inside the add-on container:
 
@@ -90,6 +127,10 @@ python migrate_csv_to_db.py --data-dir /data/dataset
 - `GET /health`
 - `GET /predict`
 - `GET /predict?model=rf`
+- `GET /forecast` — unified nowcast, radar arrival diagnostic, and hourly/daily NWP forecast
+- `GET /official-warnings` — active TMD CAP warnings matched to `WEATHER_LAT/WEATHER_LON`
+- `GET /rain-stop` — history-based experimental rain-stop estimate
+- `GET /ha-source/status` — Home Assistant source configuration and health (token redacted)
 - `POST /reading`
 
 ## Example POST Body
