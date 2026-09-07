@@ -46,6 +46,8 @@ via the Supervisor's Core API proxy (`homeassistant_api: true` in `config.yaml` 
 MQTT broker needed):
 
 - `sensor.weather_ai_temperature`, `sensor.weather_ai_humidity`, `sensor.weather_ai_pressure`
+- `sensor.weather_ai_last_update` — timestamp heartbeat ของ prediction ล่าสุด
+  (อัปเดตทุกครั้งที่คำนวณสำเร็จ แม้ค่าเซนเซอร์ที่ปัดเศษแล้วจะไม่เปลี่ยน)
 - `sensor.weather_ai_heat_index` (attribute: `comfort_level`)
 - `sensor.weather_ai_dew_point` — from the `dew_point` feature already computed in
   `weather_features_lib.py` (no new modeling, just exposed)
@@ -93,7 +95,9 @@ area-matched warnings from the TMD CAP feed with source/expiry metadata.
 Revision messages can be sent proactively only after setting
 `revision_alert_enabled` to `true`; the default is off and the cooldown/poll
 interval are controlled by `revision_alert_cooldown_seconds` and
-`revision_poll_seconds`.
+`revision_poll_seconds`. Telegram command polling recreates its HTTP session after
+a connection reset, backs off from 5 to 60 seconds, and honors Telegram's `429`
+`retry_after` value.
 
 ### ดึงเซนเซอร์จาก Home Assistant โดยตรง (14.6)
 
@@ -108,8 +112,15 @@ Supervisor จะส่ง `SUPERVISOR_TOKEN` ให้อัตโนมัต�
 add-on จะอ่านแบบ read-only จาก `/states/<entity_id>` ทุก `ha_poll_seconds` วินาที
 (ค่าเริ่มต้น 60) ตรวจเวลาของข้อมูลไม่ให้เกิน `ha_stale_after_seconds` (180 วินาที),
 แปลง °F/K เป็น °C และ Pa/kPa/inHg เป็น hPa, พร้อมตัดค่า `unknown`/`unavailable`.
-การอ่านซ้ำ observation เดิมจะถูก deduplicate ก่อนเข้า pipeline เดิมของ `/reading`.
+สำหรับ `binary_sensor` ฝน ค่า `on/off` ที่คงเดิมถือเป็น state ที่ใช้งานได้แม้
+`last_updated` เก่า (เพราะ binary sensor ไม่ได้ส่ง heartbeat ทุกนาที); แต่ถ้าเป็น
+`unknown`/`unavailable` หรือเป็นเซนเซอร์อัตราฝนแบบตัวเลขที่ stale ระบบจะไม่สร้างค่าแห้ง
+ปลอม การอ่านซ้ำ observation เดิมจะถูก deduplicate ก่อนเข้า pipeline เดิมของ `/reading`.
 ดูสถานะได้ที่ `GET /ha-source/status` หรือ `GET /health`.
+ใน status ให้ดู `last_prediction_ready`, `last_prediction_reason`, `ingest_count`
+และ `prediction_count` แยกจาก `status=ready`: ถ้า source พร้อมแต่ข้อมูลต่อเนื่องยังไม่ถึง
+หน้าต่างฟีเจอร์ จะเห็น `last_prediction_ready: false` และเหตุผล `waiting_for_history`.
+ฟิลด์ `server_now_at_utc` ใช้เทียบเวลาของ add-on กับนาฬิกา HA เมื่อเวลาบนการ์ดไม่ตรงกัน.
 
 การรันแบบ Docker Compose ภายนอก Supervisor ให้ตั้ง `HA_API_BASE` เป็น URL ของ Core API
 และ `HA_TOKEN` เป็น long-lived token ผ่าน environment/secret เท่านั้น (ไม่ใส่ token ใน

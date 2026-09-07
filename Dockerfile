@@ -38,7 +38,7 @@ RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
 COPY run.sh /run.sh
 COPY predict_weather_ai.py weather_api.py weather_features_lib.py weather_db.py telegram_notifier.py telegram_bot.py nwp_forecast.py nwp_bias.py temp_interval.py rain_stop.py forecast_revision.py official_warnings.py ha_source.py migrate_csv_to_db.py ha_publisher.py radar_nowcast.py radar_advection.py cloud_nowcast.py forecast_scoring.py forecast_service.py alert_policy.py weather_drift.py /app/
 COPY rain_probability.py weather_probability_model.py weather_event_report.py train_weather_ai.py train_temperature_intervals.py /app/
-COPY weather_features.joblib weather_thresholds.joblib /app/
+COPY evaluation.json weather_features.joblib weather_regression_features.joblib weather_thresholds.joblib /app/
 COPY weather_xgb_model_5m.joblib weather_xgb_model_10m.joblib weather_xgb_model_30m.joblib /app/
 
 # Large RF/temp models aren't committed to the repo (see .gitignore) — pulled from

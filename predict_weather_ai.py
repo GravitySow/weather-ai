@@ -26,7 +26,7 @@ PREDICTION_WINDOWS = [5, 10, 30, 60, 120]
 # models were dropped: min_samples_leaf=2 trees ballooned to ~600MB each in
 # RAM for zero accuracy gain over persistence).
 TEMP_FORECAST_WINDOWS = [30]
-MODEL_KIND = "rf"  # Options: "xgb", "rf"
+MODEL_KIND = "rf"  # Options: "xgb", "rf", "extra_trees"
 DATA_DIR = os.getenv("WEATHER_DATA_DIR", "dataset")
 MAX_OBSERVATION_AGE_SECONDS = 180
 
@@ -225,6 +225,15 @@ def predict(path=None, model_kind=MODEL_KIND, model_dir=None):
 
     trained_features = _cached_joblib_load(model_path("weather_features.joblib"))
     thresholds = _cached_joblib_load(model_path("weather_thresholds.joblib"))
+    # Rain bundles may evolve with new trend features while the optional
+    # temperature regressor remains on its older, smaller feature schema.
+    # Keep the two manifests independent so promoting a rain candidate cannot
+    # break the 30-minute temperature forecast.
+    temp_features_path = model_path("weather_regression_features.joblib")
+    if os.path.exists(temp_features_path):
+        temp_features = _cached_joblib_load(temp_features_path)
+    else:
+        temp_features = trained_features
     bundle_metadata = _load_bundle_metadata(model_dir)
 
     # An explicit CSV is a historical replay.  It must be isolated from the
@@ -349,7 +358,8 @@ def predict(path=None, model_kind=MODEL_KIND, model_dir=None):
         if not os.path.exists(temp_model_path):
             continue
         temp_model = _cached_joblib_load(temp_model_path)
-        forecast_temp = float(temp_model.predict(X_latest)[0])
+        temp_input = latest[temp_features]
+        forecast_temp = float(temp_model.predict(temp_input)[0])
         result["temp_forecast"][f"{horizon}m"] = {
             "temp": forecast_temp,
             "delta": forecast_temp - temp_now,
@@ -449,7 +459,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         default=MODEL_KIND,
-        choices=["xgb", "rf"],
+        choices=["xgb", "rf", "extra_trees"],
         help="Model kind to use.",
     )
     parser.add_argument("--json", action="store_true", help="Print one-line JSON for Node-RED.")

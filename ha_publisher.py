@@ -7,7 +7,7 @@ broker or extra HA configuration needed.
 
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -228,6 +228,26 @@ def publish_prediction(prediction):
         )
 
     _publish_weather_entity(prediction, cloud)
+
+    # Keep a dedicated heartbeat separate from the value sensors.  Home
+    # Assistant may leave ``last_updated`` unchanged when a rounded value and
+    # its attributes are identical to the previous write, even though a new
+    # prediction was calculated successfully.  A timestamp state that changes
+    # on every publish gives the dashboard and automations an unambiguous
+    # prediction heartbeat and also records which source observation produced
+    # it.
+    published_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    _set_state(
+        "sensor.weather_ai_last_update",
+        published_at,
+        {
+            "device_class": "timestamp",
+            "friendly_name": "Weather AI Last Update",
+            "source_observation_at_utc": prediction.get("timestamp"),
+            "model_version": prediction.get("model_version"),
+            "model": prediction.get("model"),
+        },
+    )
 
 
 # HA's weather domain only accepts states from this fixed set — see

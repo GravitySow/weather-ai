@@ -30,6 +30,12 @@ _status: dict[str, Any] = {
     "reason": "source_disabled",
     "last_success_at_utc": None,
     "last_observation_at_utc": None,
+    "last_ingest_at_utc": None,
+    "ingest_count": 0,
+    "last_prediction_ready": None,
+    "last_prediction_reason": None,
+    "last_prediction_success_at_utc": None,
+    "prediction_count": 0,
     "last_error_at_utc": None,
     "last_error": None,
     "error_count": 0,
@@ -208,6 +214,23 @@ def _rain(state: dict[str, Any]) -> tuple[bool | None, float | None]:
     return None, None
 
 
+def _rain_is_binary_state(entity_id: str, state: dict[str, Any]) -> bool:
+    """Binary sensors are stateful, not heartbeat sensors.
+
+    Home Assistant normally updates ``last_updated`` only when a binary
+    sensor changes state or attributes. A healthy contact that stays ``off``
+    for hours is therefore not stale merely because that timestamp is old.
+    Numeric rain-rate sensors still require a fresh timestamp below.
+    """
+    if entity_id.split(".", 1)[0] == "binary_sensor":
+        return True
+    token = str(state.get("state") or "").strip().lower()
+    return token in {
+        "on", "off", "true", "false", "yes", "no", "open", "closed",
+        "wet", "dry", "raining", "rain", "clear", "not raining",
+    }
+
+
 def _light(state: dict[str, Any]) -> float | str | None:
     number = _number(state.get("state"))
     if number is not None:
@@ -294,16 +317,23 @@ def fetch_reading(now: datetime | None = None) -> dict[str, Any]:
         else:
             if key == "rain":
                 # A configured rain sensor is part of the rain label. Never
-                # turn an unknown/stale rain state into a synthetic dry flag.
-                if observed is None:
-                    reason = "missing_timestamp_rain"
-                    _set_status(status="unavailable", reason=reason, last_error=reason, last_error_at_utc=_now_iso(), error_count=_status.get("error_count", 0) + 1)
-                    return {"status": "unavailable", "reason": reason, "reading": None}
-                if age is None or age > config["stale_after_seconds"]:
-                    reason = "stale_rain"
-                    _set_status(status="stale", reason=reason, last_error=reason, last_error_at_utc=_now_iso(), error_count=_status.get("error_count", 0) + 1)
-                    return {"status": "stale", "reason": reason, "reading": None}
-                timestamps[key] = observed
+                # turn an unknown state or stale numeric rate into dry.
+                if _rain_is_binary_state(config["rain_entity"], state):
+                    # For on/off entities the state itself is the observation;
+                    # an old last_updated is normal while the contact remains
+                    # unchanged. Do not let it move observation_at backwards.
+                    if observed is not None and age is not None and age <= config["stale_after_seconds"]:
+                        timestamps[key] = observed
+                else:
+                    if observed is None:
+                        reason = "missing_timestamp_rain"
+                        _set_status(status="unavailable", reason=reason, last_error=reason, last_error_at_utc=_now_iso(), error_count=_status.get("error_count", 0) + 1)
+                        return {"status": "unavailable", "reason": reason, "reading": None}
+                    if age is None or age > config["stale_after_seconds"]:
+                        reason = "stale_rain"
+                        _set_status(status="stale", reason=reason, last_error=reason, last_error_at_utc=_now_iso(), error_count=_status.get("error_count", 0) + 1)
+                        return {"status": "stale", "reason": reason, "reading": None}
+                    timestamps[key] = observed
             elif observed is not None and age is not None and age > config["stale_after_seconds"]:
                 # Optional light does not make the whole weather reading stale.
                 states[key] = {}
@@ -358,12 +388,42 @@ def poll_once(callback: Callable[[dict[str, Any]], Any]) -> dict[str, Any]:
     return result
 
 
+def record_ingest_result(result: dict[str, Any], observation_at: str | None = None) -> None:
+    """Record whether the common pipeline produced a prediction.
+
+    Fetch health and model readiness are separate signals: a valid HA sample
+    can be persisted while the model is still waiting for its continuous
+    feature window. Keeping that distinction in status makes this diagnosable
+    without exposing the full prediction or any credentials.
+    """
+    ready = bool(result.get("prediction_ready"))
+    message = str(result.get("message") or "")
+    reason = None if ready else "prediction_not_ready"
+    lowered = message.lower()
+    if not ready and any(token in lowered for token in ("not enough", "continuous", "history")):
+        reason = "waiting_for_history"
+    elif not ready and "stale" in lowered:
+        reason = "stale_history"
+    now = _now_iso()
+    with _state_lock:
+        if observation_at:
+            _status["last_observation_at_utc"] = observation_at
+        _status["last_ingest_at_utc"] = now
+        _status["ingest_count"] = int(_status.get("ingest_count", 0)) + 1
+        _status["last_prediction_ready"] = ready
+        _status["last_prediction_reason"] = reason
+        if ready:
+            _status["last_prediction_success_at_utc"] = now
+            _status["prediction_count"] = int(_status.get("prediction_count", 0)) + 1
+
+
 def poll_loop(callback: Callable[[dict[str, Any]], Any]) -> None:
     """Continuously poll HA. A callback failure is isolated from the loop."""
     backoff_seconds = 60
     while True:
         config = _config()
         interval = config["poll_seconds"]
+        cycle_started = time.monotonic()
         result = fetch_reading()
         if result.get("status") == "ready" and result.get("reading"):
             try:
@@ -377,24 +437,38 @@ def poll_loop(callback: Callable[[dict[str, Any]], Any]) -> None:
             # A transient timeout/429/5xx should not hammer the Core API. The
             # next successful read resets the cadence to the configured poll.
             backoff_seconds = min(300, max(interval, backoff_seconds * 2))
-        time.sleep(backoff_seconds)
+        # Sleep only for the remainder of the interval. The callback is
+        # normally a non-blocking queue put, but this also keeps cadence stable
+        # if a caller supplies a synchronous callback in another deployment.
+        time.sleep(max(0.0, backoff_seconds - (time.monotonic() - cycle_started)))
 
 
 def get_source_status() -> dict[str, Any]:
     config = _config()
     configured, reason = _configured(config)
+    server_now = datetime.now(timezone.utc)
     with _state_lock:
         current = dict(_status)
+    if not config["enabled"]:
+        current["status"] = "disabled"
+        current["reason"] = "source_disabled"
+    elif not configured:
+        current["status"] = "unavailable"
+        current["reason"] = reason
+    elif current.get("status") == "disabled" and current.get("reason") == "source_disabled":
+        current["status"] = "starting"
+        current["reason"] = "awaiting_first_poll"
     observed_at = _parse_timestamp(current.get("last_observation_at_utc"))
     observation_age = None
     if observed_at is not None:
-        observation_age = max(0.0, (datetime.now(timezone.utc) - observed_at).total_seconds())
+        observation_age = max(0.0, (server_now - observed_at).total_seconds())
     current.update({
         "enabled": bool(config["enabled"]),
         "configured": bool(configured),
         "reason": current.get("reason") or reason,
         "poll_seconds": config["poll_seconds"],
         "stale_after_seconds": config["stale_after_seconds"],
+        "server_now_at_utc": server_now.isoformat().replace("+00:00", "Z"),
         "observation_age_seconds": observation_age,
         "api_base": _safe_api_base(config["api_base"]),
         "entities": {

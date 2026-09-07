@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from pandas.errors import PerformanceWarning
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.frozen import FrozenEstimator
 from sklearn.metrics import average_precision_score, brier_score_loss, confusion_matrix
 
@@ -44,6 +44,12 @@ def load_features(data_dir="dataset"):
         "radar_trend_rising", "cloud_available", "cloud_cover_now",
         "cloud_cover_low_now", "cloud_trend_rising",
     ]
+    # Historical CSV exports may predate the optional radar/cloud columns.
+    # Create them as missing values here; ``build_feature_frame`` applies the
+    # explicit availability/missing semantics shared with live inference.
+    for column in optional_numeric:
+        if column not in df:
+            df[column] = np.nan
     for column in [*core_numeric, *optional_numeric]:
         df[column] = pd.to_numeric(df[column], errors="coerce")
     # Radar/cloud context is optional in historical CSVs.  Keep those rows;
@@ -137,6 +143,13 @@ def make_classifier(kind, trees=600, jobs=4):
         return RandomForestClassifier(n_estimators=trees, max_depth=18, min_samples_leaf=2,
                                       max_features="sqrt", random_state=RANDOM_STATE,
                                       n_jobs=jobs, class_weight="balanced_subsample")
+    if kind == "extra_trees":
+        # Extremely randomized trees provide a diverse, CPU-friendly candidate
+        # without changing the deployed RF bundle.  Keep the same feature
+        # schema and calibration/evaluation path so the comparison is fair.
+        return ExtraTreesClassifier(n_estimators=trees, max_depth=24, min_samples_leaf=2,
+                                    max_features=0.7, random_state=RANDOM_STATE,
+                                    n_jobs=jobs, class_weight="balanced")
     if kind == "xgb":
         # Optional dependency: RF training never imports XGBoost or SMOTE.
         from xgboost import XGBClassifier
@@ -341,7 +354,7 @@ def main(argv=None, default_kind="rf"):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", default="dataset")
     parser.add_argument("--output-dir", default=None, help="New directory; refuses to overwrite existing artifacts")
-    parser.add_argument("--model", choices=["rf", "xgb", "rf_onset"], default=default_kind)
+    parser.add_argument("--model", choices=["rf", "xgb", "rf_onset", "extra_trees"], default=default_kind)
     parser.add_argument("--horizons", nargs="+", type=int, choices=PREDICTION_WINDOWS, default=PREDICTION_WINDOWS)
     parser.add_argument("--trees", type=int, default=600)
     parser.add_argument("--jobs", type=int, default=4)

@@ -47,6 +47,40 @@ def add_rolling_features(df, group, column, windows, stats, features):
             features.append(col)
 
 
+def add_time_rate_features(df, group, columns, windows, features):
+    """Add timestamp-aware rates of change for short weather trends.
+
+    Existing ``*_trend_*`` columns intentionally preserve the raw difference
+    for backwards-compatible model bundles. These new ``*_slope_*`` columns
+    divide by the measured elapsed minutes, so timestamp jitter does not turn
+    a five-minute trend into a row-count artefact.
+    """
+    elapsed_by_window = {}
+    for window in windows:
+        lag_timestamp = group["timestamp"].shift(window)
+        elapsed = (df["timestamp"] - lag_timestamp).dt.total_seconds() / 60.0
+        elapsed_by_window[window] = elapsed.where(elapsed > 0)
+    for column in columns:
+        for window in windows:
+            lag = group[column].shift(window)
+            col = f"{column}_slope_{window}m"
+            df[col] = (df[column] - lag) / elapsed_by_window[window]
+            features.append(col)
+
+
+def add_rain_fraction_features(df, group, windows, features):
+    """Add short rain-duty-cycle and rain-change features."""
+    for window in windows:
+        current = group["rain_flag"].rolling(window=window, min_periods=window).mean()
+        current = current.reset_index(level=0, drop=True)
+        previous = current.groupby(df["segment_id"], group_keys=False).shift(window)
+        fraction_col = f"rain_frac_{window}m"
+        slope_col = f"rain_slope_{window}m"
+        df[fraction_col] = current
+        df[slope_col] = current - previous
+        features.extend([fraction_col, slope_col])
+
+
 def unique(items):
     return list(dict.fromkeys(items))
 
@@ -190,6 +224,17 @@ def build_feature_frame(df):
     add_external_nowcast_features(df, features)
 
     # --- Augmented physical features (improve longer lead time, esp. 30m) ---
+    # Short, timestamp-aware rates expose the direction and speed of local
+    # changes without replacing the legacy raw-delta features above.
+    add_time_rate_features(
+        df, group, ["pressure", "humidity", "temp"], [5, 10, 30], features
+    )
+
+    # Short rain history helps distinguish a dry-to-wet transition from a
+    # single noisy rain sensor sample. Keep the existing 60m fraction below
+    # for compatibility and add these separately for candidate models.
+    add_rain_fraction_features(df, group, [5, 10, 30], features)
+
     # Longer pressure / humidity tendency: slow synoptic-scale trend signal.
     add_lag_features(df, group, "pressure", [90, 120], features)
     add_lag_features(df, group, "humidity", [90, 120], features)

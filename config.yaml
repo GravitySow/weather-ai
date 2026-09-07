@@ -1,5 +1,5 @@
 name: Weather AI
-version: "1.0.6"
+version: "1.0.13"
 slug: weather_ai
 description: Rain warning API using the trained local weather model.
 url: "https://local/weather-ai"
@@ -42,7 +42,7 @@ options:
   ha_stale_after_seconds: 180
   ha_api_base: ""
 schema:
-  model_kind: list(xgb|rf)
+  model_kind: list(xgb|rf|extra_trees)
   db_host: str?
   db_port: port?
   db_user: str?

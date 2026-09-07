@@ -22,7 +22,15 @@ sections:
 
           ### {{ states('sensor.weather_ai_temperature') }}°C · 💧{{ states('sensor.weather_ai_humidity') }}% · 🥵 HI {{ hi }}°C ({{ comfort }})
 
-          <sub>อัปเดต {{ as_timestamp(states.sensor.weather_ai_temperature.last_updated) | timestamp_custom('%H:%M:%S') }}</sub>
+          {% set heartbeat = states('sensor.weather_ai_last_update') %}
+          {% set heartbeat_ts = as_timestamp(heartbeat, none) %}
+          {% if heartbeat_ts is not none %}
+          {% set age_min = ((as_timestamp(now()) - heartbeat_ts) / 60) | int %}
+          {% if age_min < 0 %}{% set age_min = 0 %}{% endif %}
+          <sub>คำนวณล่าสุด {{ heartbeat_ts | timestamp_custom('%d/%m/%Y %H:%M:%S', true) }} น. ({{ age_min }} นาทีที่แล้ว)</sub>
+          {% else %}
+          <sub>คำนวณล่าสุดยังไม่มีข้อมูล</sub>
+          {% endif %}
 
       - type: horizontal-stack
         cards:

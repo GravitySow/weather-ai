@@ -40,6 +40,41 @@ MODEL_KIND = os.getenv("WEATHER_MODEL_KIND") or "rf"
 BANGKOK_OFFSET = timedelta(hours=7)
 SCHEDULED_HOURS = (6, 21)  # 06:00 morning forecast, 21:00 evening recap
 
+# Long-polling is expected to occasionally lose a TCP/TLS connection (NAT,
+# Wi-Fi, or Telegram edge rotation). Keep the retry bounded so a real outage
+# does not produce a noisy 5-second traceback loop or hammer the API.
+_POLL_TIMEOUT_SECONDS = 30
+_POLL_REQUEST_TIMEOUT_SECONDS = 35
+_POLL_BACKOFF_INITIAL_SECONDS = 5
+_POLL_BACKOFF_MAX_SECONDS = 60
+_POLL_BACKOFF_MULTIPLIER = 2
+
+
+def _next_poll_backoff(delay):
+    """Return the next capped delay after a failed getUpdates request."""
+    return min(
+        _POLL_BACKOFF_MAX_SECONDS,
+        max(_POLL_BACKOFF_INITIAL_SECONDS, delay * _POLL_BACKOFF_MULTIPLIER),
+    )
+
+
+def _poll_retry_after(response):
+    """Read Telegram's optional 429 retry_after without trusting bad payloads."""
+    try:
+        value = response.json().get("parameters", {}).get("retry_after")
+        if value is not None:
+            return min(_POLL_BACKOFF_MAX_SECONDS, max(_POLL_BACKOFF_INITIAL_SECONDS, float(value)))
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return _POLL_BACKOFF_INITIAL_SECONDS
+
+
+def _new_poll_session():
+    """Create a fresh session after a reset so a broken pooled socket is not reused."""
+    session = requests.Session()
+    session.headers.update({"User-Agent": "weather-ai-telegram-poller/1.0"})
+    return session
+
 HELP_TEXT = (
     "\U0001F916 <b>คำสั่งที่ใช้ได้</b>\n"
     "/daily - สรุปสภาพอากาศวันนี้\n"
@@ -537,16 +572,19 @@ def poll_loop():
 
     url = f"{telegram_notifier.TELEGRAM_API_BASE}/bot{token}/getUpdates"
     offset = None
+    retry_delay = _POLL_BACKOFF_INITIAL_SECONDS
+    session = _new_poll_session()
 
     while True:
         try:
-            params = {"timeout": 30}
+            params = {"timeout": _POLL_TIMEOUT_SECONDS}
             if offset is not None:
                 params["offset"] = offset
 
-            response = requests.get(url, params=params, timeout=35)
+            response = session.get(url, params=params, timeout=_POLL_REQUEST_TIMEOUT_SECONDS)
             response.raise_for_status()
             updates = response.json().get("result", [])
+            retry_delay = _POLL_BACKOFF_INITIAL_SECONDS
 
             for update in updates:
                 offset = update["update_id"] + 1
@@ -571,12 +609,59 @@ def poll_loop():
                     "or a webhook) is still active; backing off 15s to let it clear"
                 )
                 time.sleep(15)
+                session.close()
+                session = _new_poll_session()
+                retry_delay = _POLL_BACKOFF_INITIAL_SECONDS
+            elif exc.response is not None and exc.response.status_code == 429:
+                retry_after = _poll_retry_after(exc.response)
+                logger.warning(
+                    "Telegram getUpdates rate-limited; retrying in %.1fs",
+                    retry_after,
+                )
+                time.sleep(retry_after)
+                retry_delay = _next_poll_backoff(retry_delay)
             else:
-                logger.exception("Telegram getUpdates failed; retrying in 5s")
-                time.sleep(5)
-        except requests.RequestException:
-            logger.exception("Telegram getUpdates failed; retrying in 5s")
-            time.sleep(5)
+                status = exc.response.status_code if exc.response is not None else "unknown"
+                logger.warning(
+                    "Telegram getUpdates HTTP %s; retrying in %ss",
+                    status,
+                    retry_delay,
+                )
+                time.sleep(retry_delay)
+                retry_delay = _next_poll_backoff(retry_delay)
+        except requests.Timeout as exc:
+            logger.warning(
+                "Telegram getUpdates timed out (%s); retrying in %ss",
+                exc,
+                retry_delay,
+            )
+            time.sleep(retry_delay)
+            retry_delay = _next_poll_backoff(retry_delay)
+            session.close()
+            session = _new_poll_session()
+        except requests.ConnectionError as exc:
+            # A peer reset during TLS is a transient transport failure, not a
+            # bad token. Log the concise error at warning level and leave the
+            # traceback at debug level so normal add-on logs stay actionable.
+            logger.warning(
+                "Telegram getUpdates connection reset (%s); retrying in %ss",
+                exc,
+                retry_delay,
+            )
+            logger.debug("Telegram getUpdates connection traceback", exc_info=True)
+            time.sleep(retry_delay)
+            retry_delay = _next_poll_backoff(retry_delay)
+            session.close()
+            session = _new_poll_session()
+        except requests.RequestException as exc:
+            logger.warning(
+                "Telegram getUpdates request failed (%s); retrying in %ss",
+                exc,
+                retry_delay,
+            )
+            logger.debug("Telegram getUpdates request traceback", exc_info=True)
+            time.sleep(retry_delay)
+            retry_delay = _next_poll_backoff(retry_delay)
         except Exception:
             logger.exception("Unexpected error in Telegram poll loop; retrying in 5s")
             time.sleep(5)

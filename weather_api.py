@@ -1,6 +1,7 @@
 import csv
 import logging
 import os
+import queue
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -66,6 +67,12 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Weather AI API")
 
+# HA polling must not wait for the comparatively expensive prediction path
+# (DB/radar/cloud lookups and model inference). Keeping observations in a
+# bounded FIFO preserves their source timestamps while the worker serializes
+# writes/predictions and prevents poll gaps caused by callback latency.
+_HA_INGEST_QUEUE = queue.Queue(maxsize=300)
+
 
 @app.on_event("startup")
 def on_startup():
@@ -79,13 +86,38 @@ def on_startup():
     threading.Thread(target=forecast_scoring.schedule_loop, daemon=True).start()
     if ha_source.is_enabled():
         threading.Thread(
+            target=_ha_ingest_worker,
+            daemon=True,
+            name="ha-ingest-worker",
+        ).start()
+        threading.Thread(
             target=ha_source.poll_loop,
-            args=(ingest_homeassistant_reading,),
+            args=(_enqueue_homeassistant_reading,),
             daemon=True,
             name="ha-source-poll",
         ).start()
     if REVISION_ALERT_ENABLED:
         threading.Thread(target=revision_alert_loop, daemon=True).start()
+
+
+def _enqueue_homeassistant_reading(payload: dict) -> None:
+    """Queue a fetched observation without blocking the HA poller."""
+    try:
+        _HA_INGEST_QUEUE.put_nowait(payload)
+    except queue.Full:
+        # Never block the source poller behind a slow model. A bounded queue
+        # protects memory; the status/log makes an overload actionable.
+        logger.error("Home Assistant ingest queue is full; dropping observation")
+
+
+def _ha_ingest_worker() -> None:
+    """Serialize CSV/DB writes and inference in observation order."""
+    while True:
+        payload = _HA_INGEST_QUEUE.get()
+        try:
+            ingest_homeassistant_reading(payload)
+        finally:
+            _HA_INGEST_QUEUE.task_done()
 
 
 def revision_alert_loop():
@@ -486,8 +518,10 @@ def ingest_homeassistant_reading(payload: dict):
     try:
         reading = WeatherReading(**payload)
         result = process_reading(reading)
+        ha_source.record_ingest_result(result, reading.timestamp)
         logger.info("Ingested Home Assistant observation at %s (prediction_ready=%s)", reading.timestamp, result.get("prediction_ready"))
     except Exception:
+        ha_source.record_ingest_result({"prediction_ready": False, "message": "ingest_error"})
         logger.exception("Home Assistant reading ingestion failed")
 
 
@@ -505,8 +539,8 @@ def ha_source_status():
 @app.get("/predict")
 def predict_latest(model: str | None = None):
     model_kind = model or MODEL_KIND
-    if model_kind not in ["xgb", "rf"]:
-        raise HTTPException(status_code=400, detail='model must be "xgb" or "rf"')
+    if model_kind not in ["xgb", "rf", "extra_trees"]:
+        raise HTTPException(status_code=400, detail='model must be "xgb", "rf" or "extra_trees"')
 
     try:
         return predict(model_kind=model_kind)
@@ -518,8 +552,8 @@ def predict_latest(model: str | None = None):
 def unified_forecast(model: str | None = None):
     """Return the user-facing nowcast → NWP forecast assembled in one place."""
     model_kind = model or MODEL_KIND
-    if model_kind not in ["xgb", "rf"]:
-        raise HTTPException(status_code=400, detail='model must be "xgb" or "rf"')
+    if model_kind not in ["xgb", "rf", "extra_trees"]:
+        raise HTTPException(status_code=400, detail='model must be "xgb", "rf" or "extra_trees"')
     result = forecast_service.get_forecast(model_kind=model_kind)
     if result is None:
         raise HTTPException(status_code=503, detail="forecast is not ready; need continuous sensor history")
