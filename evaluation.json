@@ -1,6 +1,7 @@
 {
   "schema_version": 2,
   "created_at_utc": "2026-09-07T17:44:12.934049+00:00",
+  "model_version": "rf-trend-20260908",
   "model_kind": "rf",
   "feature_cadence": "60s +/-30s",
   "feature_count": 165,
