@@ -216,7 +216,10 @@ def append_reading(reading):
         "wind_direction": reading.wind_direction,
     }
 
-    with csv_path.open("a", newline="", encoding="utf-8") as csv_file:
+    # ``a`` is write-only, so an existing daily file cannot be inspected with
+    # ``readline`` below.  Use ``a+`` and rewind before reading the header;
+    # append mode still guarantees that the new row is written at EOF.
+    with csv_path.open("a+", newline="", encoding="utf-8") as csv_file:
         fieldnames = [
             "timestamp", "temp", "humidity", "pressure", "rain", "rain_flag",
             "wind_available", "wind_speed", "wind_gust", "wind_direction",
