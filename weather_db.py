@@ -137,6 +137,7 @@ def init_db():
                     next_rain_alert_horizon VARCHAR(8),
                     consecutive_alert_count INT NOT NULL DEFAULT 0,
                     radar_alert_count INT NOT NULL DEFAULT 0,
+                    dry_streak INT NOT NULL DEFAULT 0,
                     last_notification_at DATETIME(6),
                     last_notification_kind VARCHAR(32),
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -148,6 +149,9 @@ def init_db():
             )
             cursor.execute(
                 "ALTER TABLE alert_state ADD COLUMN IF NOT EXISTS radar_alert_count INT NOT NULL DEFAULT 0"
+            )
+            cursor.execute(
+                "ALTER TABLE alert_state ADD COLUMN IF NOT EXISTS dry_streak INT NOT NULL DEFAULT 0"
             )
             cursor.execute(
                 "ALTER TABLE alert_state ADD COLUMN IF NOT EXISTS last_notification_at DATETIME(6)"
@@ -619,6 +623,7 @@ def set_alert_state(
     radar_alert_count=0,
     last_notification_at=None,
     last_notification_kind=None,
+    dry_streak=0,
 ):
     with get_connection() as conn:
         with conn.cursor() as cursor:
@@ -627,9 +632,9 @@ def set_alert_state(
                 INSERT INTO alert_state (
                     id, is_raining_now, any_rain_alert, next_rain_alert_horizon,
                     consecutive_alert_count, radar_alert_count,
-                    last_notification_at, last_notification_kind
+                    last_notification_at, last_notification_kind, dry_streak
                 )
-                VALUES (1, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                     is_raining_now = VALUES(is_raining_now),
                     any_rain_alert = VALUES(any_rain_alert),
@@ -637,7 +642,8 @@ def set_alert_state(
                     consecutive_alert_count = VALUES(consecutive_alert_count),
                     radar_alert_count = VALUES(radar_alert_count),
                     last_notification_at = VALUES(last_notification_at),
-                    last_notification_kind = VALUES(last_notification_kind)
+                    last_notification_kind = VALUES(last_notification_kind),
+                    dry_streak = VALUES(dry_streak)
                 """,
                 (
                     is_raining_now,
@@ -647,5 +653,6 @@ def set_alert_state(
                     radar_alert_count,
                     last_notification_at,
                     last_notification_kind,
+                    dry_streak,
                 ),
             )

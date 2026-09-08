@@ -47,6 +47,12 @@ _last_nwp_log_hour = None
 # genuine alerts.
 RAIN_ALERT_CONFIRM_STREAK = int(os.getenv("RAIN_ALERT_CONFIRM_STREAK", "3"))
 
+# A rain sensor can report a dry minute between drops.  Keep the last
+# confirmed rain state until this many consecutive source polls are dry, so a
+# brief flicker neither creates a false "rain stopped" notification nor hides
+# the later return of genuine rain behind the rain-start cooldown.
+RAIN_STOP_CONFIRM_STREAK = max(1, int(os.getenv("RAIN_STOP_CONFIRM_STREAK", "3")))
+
 # Radar-derived alert (radar_nowcast.py): unlike the ML alert above, this
 # signal has never been backtested — RainViewer's free tier has no nowcast
 # archive, so there's no historical data to validate precision/recall against.
@@ -275,9 +281,37 @@ def save_reading_to_db(reading, row):
 
 
 def notify_rain_state_change(prediction):
-    is_raining_now = prediction["is_raining_now"]
-    any_rain_alert = prediction["any_rain_alert"]
+    observed_raining = bool(prediction["is_raining_now"])
+    raw_any_rain_alert = bool(prediction["any_rain_alert"])
     next_horizon = prediction["next_rain_alert_horizon"]
+
+    try:
+        previous = weather_db.get_alert_state()
+    except Exception:
+        logger.exception("Could not read alert state from DB; skipping Telegram notification")
+        return
+
+    previous_raining = bool(previous["is_raining_now"]) if previous else False
+    previous_dry_streak = int(previous.get("dry_streak", 0)) if previous else 0
+
+    if observed_raining:
+        dry_streak = 0
+    elif previous_raining:
+        dry_streak = previous_dry_streak + 1
+    else:
+        # Keep the stored value bounded.  The streak only matters while a
+        # confirmed rain session is active, but recording a recent dry state
+        # makes restarts deterministic too.
+        dry_streak = min(previous_dry_streak + 1, RAIN_STOP_CONFIRM_STREAK)
+
+    # `is_raining_now` is intentionally the debounced state, not the raw
+    # sensor sample.  Until the dry streak is confirmed, suppress "incoming
+    # rain" signals because the current rain event is still in progress.
+    is_raining_now = bool(
+        observed_raining
+        or (previous_raining and dry_streak < RAIN_STOP_CONFIRM_STREAK)
+    )
+    any_rain_alert = raw_any_rain_alert and not is_raining_now
 
     radar = prediction.get("radar") or {}
     radar_signal = bool(
@@ -287,13 +321,6 @@ def notify_rain_state_change(prediction):
         and radar.get("trend_rising")
     )
 
-    try:
-        previous = weather_db.get_alert_state()
-    except Exception:
-        logger.exception("Could not read alert state from DB; skipping Telegram notification")
-        return
-
-    previous_raining = bool(previous["is_raining_now"]) if previous else False
     previous_count = int(previous.get("consecutive_alert_count", 0)) if previous else 0
     previous_confirmed = previous_count >= RAIN_ALERT_CONFIRM_STREAK
 
@@ -330,16 +357,19 @@ def notify_rain_state_change(prediction):
     alert_context = telegram_bot.format_prediction_context(prediction)
 
     if is_raining_now and not previous_raining:
+        kind = "rain_resume" if previous else "rain_start"
+        headline = "🌧️ ฝนกลับมาตกอีกครั้ง" if previous else "🌧️ ฝนเริ่มตกแล้ว"
         emit(
-            "rain_start",
-            f"\U0001F327️ ฝนเริ่มตกแล้ว ({prediction['timestamp']})\n"
+            kind,
+            f"{headline} ({prediction['timestamp']})\n"
             f"อุณหภูมิ {prediction['temp']:.1f}°C "
             f"ความชื้น {prediction['humidity']:.0f}%\n\n{alert_context}"
         )
     elif not is_raining_now and previous_raining:
         emit(
             "rain_stop",
-            f"☀️ ฝนหยุดตกแล้ว ({prediction['timestamp']})"
+            f"☀️ ฝนหยุดตกแล้ว ({prediction['timestamp']})\n"
+            f"<i>ยืนยันว่าเซนเซอร์แห้งต่อเนื่อง {RAIN_STOP_CONFIRM_STREAK} รอบ</i>"
         )
 
     if confirmed_alert and not previous_confirmed:
@@ -369,7 +399,7 @@ def notify_rain_state_change(prediction):
     try:
         weather_db.set_alert_state(
             is_raining_now, confirmed_alert, next_horizon, consecutive_count, radar_count,
-            last_notification_at, last_notification_kind,
+            last_notification_at, last_notification_kind, dry_streak=dry_streak,
         )
     except Exception:
         logger.exception("Could not persist alert state to DB")

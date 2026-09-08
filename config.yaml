@@ -1,5 +1,5 @@
 name: Weather AI
-version: "1.0.18"
+version: "1.0.19"
 slug: weather_ai
 description: Rain warning API using the trained local weather model.
 url: "https://local/weather-ai"
@@ -29,6 +29,7 @@ options:
   nwp_bias_correction_path: ""
   nwp_temp_interval_path: ""
   alert_cooldown_seconds: 1800
+  rain_stop_confirm_polls: 3
   revision_alert_enabled: false
   revision_alert_cooldown_seconds: 3600
   revision_poll_seconds: 900
@@ -56,6 +57,7 @@ schema:
   nwp_bias_correction_path: str?
   nwp_temp_interval_path: str?
   alert_cooldown_seconds: int?
+  rain_stop_confirm_polls: int?
   revision_alert_enabled: bool?
   revision_alert_cooldown_seconds: int?
   revision_poll_seconds: int?
