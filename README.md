@@ -79,6 +79,10 @@ editor**, and paste in the contents of `dashboard.yaml`.
 If you already have a large dashboard with an existing `views:` list, do not paste the
 full file inside another `views:` key. Replace or append one view item using
 `dashboard_view.yaml` (it starts with `- title: Weather AI`) under the existing `views:` list.
+For the full Weather AI view, including the optional radar/cloud/TMD/rain-stop cards,
+use `dashboard_view_complete.yaml` the same way. Those optional entities appear after
+the corresponding add-on data source has produced its first result; until then HA may
+show them as unavailable.
 
 ## Configuration options
 
