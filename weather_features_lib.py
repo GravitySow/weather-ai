@@ -93,8 +93,16 @@ def add_external_nowcast_features(df, features):
     the ``*_available`` and ``*_missing`` indicators prevent zero-filled
     legacy rows from being mistaken for a measured clear sky.
     """
-    wind_available_present = "wind_available" in df
-    nwp_available_present = "nwp_available" in df
+    raw_wind_available = (
+        pd.to_numeric(df["wind_available"], errors="coerce")
+        if "wind_available" in df else None
+    )
+    raw_nwp_available = (
+        pd.to_numeric(df["nwp_available"], errors="coerce")
+        if "nwp_available" in df else None
+    )
+    wind_available_present = raw_wind_available is not None and raw_wind_available.notna().any()
+    nwp_available_present = raw_nwp_available is not None and raw_nwp_available.notna().any()
     nwp_probability_valid = (
         pd.to_numeric(df["nwp_precipitation_probability"], errors="coerce").notna()
         if "nwp_precipitation_probability" in df else pd.Series(False, index=df.index)
@@ -151,10 +159,18 @@ def add_external_nowcast_features(df, features):
         # Infer availability for exports that carry wind values but predate
         # the explicit availability column.
         df["wind_available"] = wind_speed_valid.astype(float)
+    elif raw_wind_available is not None and raw_wind_available.isna().any():
+        df["wind_available"] = raw_wind_available.where(
+            raw_wind_available.notna(), wind_speed_valid.astype(float)
+        )
     if not nwp_available_present:
         # Forecast exports that predate the explicit availability bit can
         # still be used safely when they contain a probability value.
         df["nwp_available"] = nwp_probability_valid.astype(float)
+    elif raw_nwp_available is not None and raw_nwp_available.isna().any():
+        df["nwp_available"] = raw_nwp_available.where(
+            raw_nwp_available.notna(), nwp_probability_valid.astype(float)
+        )
 
     for source in ("radar", "cloud"):
         available = df[f"{source}_available"].fillna(0.0).clip(0.0, 1.0)
