@@ -51,7 +51,7 @@ warnings.simplefilter(action="ignore", category=PerformanceWarning)
 # for the same path; retraining requires a process restart to pick up.
 _MODEL_CACHE = {}
 _MODEL_METADATA_CACHE = {}
-_HISTORY_COLUMNS = ["timestamp", "temp", "humidity", "pressure", "rain_flag"]
+_HISTORY_COLUMNS = ["timestamp", "temp", "humidity", "pressure", "rain_flag", "light"]
 
 
 def _cached_joblib_load(path):
@@ -67,10 +67,14 @@ def _load_bundle_metadata(model_dir):
         return _MODEL_METADATA_CACHE[key]
 
     metadata = {}
-    manifest_path = Path(model_dir or ".") / "evaluation.json"
+    bundle_root = Path(model_dir or ".")
+    manifest_path = bundle_root / "model_manifest.json"
+    evaluation_path = bundle_root / "evaluation.json"
     try:
         if manifest_path.exists():
             metadata = json.loads(manifest_path.read_text(encoding="utf-8"))
+        elif evaluation_path.exists():
+            metadata = json.loads(evaluation_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         logger.warning("Could not read model bundle metadata from %s", manifest_path)
 
@@ -83,6 +87,8 @@ def _load_bundle_metadata(model_dir):
             if metadata.get("created_at_utc") else f"legacy:{bundle_name}"
         ),
         "feature_count": metadata.get("feature_count"),
+        "feature_sha256": metadata.get("feature_sha256"),
+        "status": metadata.get("status", "legacy" if not manifest_path.exists() else "candidate"),
         "required_runtime_horizons": metadata.get("required_runtime_horizons"),
     }
     _MODEL_METADATA_CACHE[key] = metadata
@@ -177,6 +183,8 @@ def load_weather_data(path=None, max_files=None):
 
     for col in ["temp", "humidity", "pressure", "rain_flag"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "light" in df:
+        df["light"] = pd.to_numeric(df["light"], errors="coerce")
     df = df.dropna(subset=["temp", "humidity", "pressure", "rain_flag"])
 
     return _merge_weather_history(df)
@@ -203,6 +211,7 @@ def load_recent_from_db(lookback_minutes=130):
         for col in [
             "temp", "humidity", "pressure", "rain_flag",
             "wind_available", "wind_speed", "wind_gust", "wind_direction",
+            "light",
         ]:
             if col in db_df:
                 db_df[col] = pd.to_numeric(db_df[col], errors="coerce")
@@ -364,6 +373,8 @@ def predict(path=None, model_kind=MODEL_KIND, model_dir=None):
         "bundle_schema_version": bundle_metadata["schema_version"],
         "bundle_created_at_utc": bundle_metadata["created_at_utc"],
         "feature_count": len(trained_features),
+        "feature_sha256": bundle_metadata.get("feature_sha256"),
+        "model_status": bundle_metadata.get("status"),
         "required_runtime_horizons": bundle_metadata["required_runtime_horizons"]
         or PREDICTION_WINDOWS,
         "temp": temp_now,

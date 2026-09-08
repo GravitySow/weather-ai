@@ -9,6 +9,13 @@ import numpy as np
 import pandas as pd
 
 
+# Station coordinates used for the clear-sky illuminance proxy.  The feature is
+# deliberately deterministic and local; it is only a fallback reference curve
+# and never a replacement for a calibrated lux sensor.
+DEFAULT_LATITUDE = 13.8692387
+DEFAULT_LONGITUDE = 100.5180519
+
+
 def add_lag_features(df, group, column, windows, features):
     for window in windows:
         lag_col = f"{column}_{window}m_ago"
@@ -79,6 +86,102 @@ def add_rain_fraction_features(df, group, windows, features):
         df[fraction_col] = current
         df[slope_col] = current - previous
         features.extend([fraction_col, slope_col])
+
+
+def _solar_elevation_degrees(timestamps, latitude=DEFAULT_LATITUDE,
+                             longitude=DEFAULT_LONGITUDE):
+    """Approximate solar elevation for UTC timestamps.
+
+    NOAA's compact fractional-year approximation is accurate enough for a
+    daylight availability gate.  It avoids adding a runtime dependency such as
+    pvlib to the Home Assistant add-on and is not used as a weather forecast.
+    """
+    ts = pd.to_datetime(timestamps, errors="coerce", utc=True)
+    # Keep NaT safe: the resulting rows are marked unavailable below.
+    day = ts.dt.dayofyear.to_numpy(dtype=float)
+    hour = (
+        ts.dt.hour.to_numpy(dtype=float)
+        + ts.dt.minute.to_numpy(dtype=float) / 60.0
+        + ts.dt.second.to_numpy(dtype=float) / 3600.0
+    )
+    gamma = 2.0 * np.pi / 365.0 * (day - 1.0 + (hour - 12.0) / 24.0)
+    decl = (
+        0.006918
+        - 0.399912 * np.cos(gamma)
+        + 0.070257 * np.sin(gamma)
+        - 0.006758 * np.cos(2.0 * gamma)
+        + 0.000907 * np.sin(2.0 * gamma)
+        - 0.002697 * np.cos(3.0 * gamma)
+        + 0.00148 * np.sin(3.0 * gamma)
+    )
+    equation_minutes = (
+        229.18
+        * (
+            0.000075
+            + 0.001868 * np.cos(gamma)
+            - 0.032077 * np.sin(gamma)
+            - 0.014615 * np.cos(2.0 * gamma)
+            - 0.040849 * np.sin(2.0 * gamma)
+        )
+    )
+    true_solar_minutes = hour * 60.0 + equation_minutes + 4.0 * longitude
+    hour_angle = np.deg2rad((true_solar_minutes / 4.0) - 180.0)
+    latitude_rad = np.deg2rad(latitude)
+    sin_elevation = (
+        np.sin(latitude_rad) * np.sin(decl)
+        + np.cos(latitude_rad) * np.cos(decl) * np.cos(hour_angle)
+    )
+    elevation = np.rad2deg(np.arcsin(np.clip(sin_elevation, -1.0, 1.0)))
+    return pd.Series(elevation, index=ts.index)
+
+
+def add_illuminance_features(df, group, features):
+    """Add optional illuminance/cloud-shadow features.
+
+    A valid zero-lux reading is different from an absent sensor value.  During
+    night or very low solar elevation the clear-sky comparison is explicitly
+    unavailable, so a dark room/night cannot masquerade as a rain signal.
+    """
+    raw = pd.to_numeric(df.get("light", pd.Series(np.nan, index=df.index)), errors="coerce")
+    available = raw.notna().astype(float)
+    light = raw.clip(lower=0.0).fillna(0.0)
+    elevation = _solar_elevation_degrees(df["timestamp"])
+    daylight = available * (elevation > 5.0).astype(float)
+    # A smooth clear-sky proxy is sufficient for relative drops.  The absolute
+    # lux value is intentionally not treated as physically calibrated.
+    sun = np.clip(np.sin(np.deg2rad(elevation)), 0.0, None)
+    expected = 105000.0 * np.power(sun, 1.15)
+    expected = pd.Series(expected, index=df.index)
+    ratio = (light / expected.replace(0.0, np.nan)).clip(0.0, 1.5)
+    # Keep the matrix numeric for tree models; availability/daylight bits carry
+    # the semantics, so an unavailable ratio is a neutral zero rather than a
+    # dropped observation.
+    ratio = ratio.where(daylight > 0.0).fillna(0.0)
+
+    df["light"] = light
+    df["light_available"] = available
+    df["light_missing"] = (available <= 0.0).astype(float)
+    df["solar_elevation_deg"] = elevation
+    df["daylight_available"] = daylight
+    df["clear_sky_light_ratio"] = ratio
+    features.extend([
+        "light_available", "light_missing", "light", "solar_elevation_deg",
+        "daylight_available", "clear_sky_light_ratio",
+    ])
+
+    for window in [5, 10, 30]:
+        # GroupBy objects may have been created before these derived columns
+        # existed; use the frame directly so the function also works for a
+        # caller that reuses a precomputed group.
+        lag_ratio = df["clear_sky_light_ratio"].groupby(df["segment_id"], group_keys=False).shift(window)
+        lag_light = df["light"].groupby(df["segment_id"], group_keys=False).shift(window)
+        ratio_delta = ratio - lag_ratio
+        light_slope = (light - lag_light) / float(window)
+        ratio_delta = ratio_delta.where(daylight > 0.0).fillna(0.0)
+        light_slope = light_slope.where(daylight > 0.0).fillna(0.0)
+        df[f"light_drop_vs_expected_{window}m"] = ratio_delta
+        df[f"light_slope_{window}m"] = light_slope
+        features.extend([f"light_drop_vs_expected_{window}m", f"light_slope_{window}m"])
 
 
 def unique(items):
@@ -335,6 +438,9 @@ def build_feature_frame(df):
 
     # --- External nowcast context (optional in legacy CSV, persisted in DB) ---
     add_external_nowcast_features(df, features)
+
+    # --- Optional illuminance / cloud-shadow context ---
+    add_illuminance_features(df, group, features)
 
     # --- Augmented physical features (improve longer lead time, esp. 30m) ---
     # Short, timestamp-aware rates expose the direction and speed of local

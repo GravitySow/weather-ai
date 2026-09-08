@@ -44,6 +44,7 @@ def load_features(data_dir="dataset"):
         "radar_trend_rising", "cloud_available", "cloud_cover_now",
         "cloud_cover_low_now", "cloud_trend_rising", "wind_available",
         "wind_speed", "wind_gust", "wind_direction",
+        "light",
         "nwp_available", "nwp_precipitation_probability", "nwp_precipitation",
         "nwp_weathercode", "nwp_wind_speed", "nwp_wind_direction",
         "nwp_cloud_cover", "nwp_lead_hours", "nwp_age_seconds",
@@ -412,6 +413,25 @@ def main(argv=None, default_kind="rf"):
               "artifact_files": artifact_files,
               "results": results}
     (output_dir / "evaluation.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    # Every training run starts as a candidate.  Promote/rollback tooling must
+    # explicitly change this append-only registry record after the gates in
+    # plan.md pass; active model files are never overwritten here.
+    manifest = {
+        "schema_version": 1,
+        "status": "candidate",
+        "model_kind": args.model,
+        "model_version": output_dir.name,
+        "created_at_utc": report["created_at_utc"],
+        "feature_count": len(features),
+        "feature_sha256": feature_digest,
+        "required_runtime_horizons": horizons,
+        "evaluation_file": "evaluation.json",
+        "threshold_file": threshold_file,
+        "data_dir": str(Path(args.data_dir).resolve()),
+    }
+    (output_dir / "model_manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     print(f"Saved model bundle and held-out evaluation: {output_dir.resolve()}", flush=True)
 
 

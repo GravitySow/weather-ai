@@ -368,6 +368,7 @@ def get_readings(start_time, end_time):
             cursor.execute(
                 """
                 SELECT reading_time, temp, humidity, pressure, rain_flag,
+                       light,
                        wind_available, wind_speed, wind_gust, wind_direction,
                        radar_available, radar_point_intensity, radar_nearby_max_intensity,
                        radar_trend_rising, cloud_available, cloud_cover_now,

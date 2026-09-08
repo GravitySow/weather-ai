@@ -127,7 +127,9 @@ add-on จะอ่านแบบ read-only จาก `/states/<entity_id>` ท
 `config.yaml` และระบบจะไม่แสดง token ใน log หรือ status). หากไม่กำหนด entity ครบหรือ
 ข้อมูล stale ระบบจะคงข้อมูลเดิมไว้และรอรอบถัดไป; `POST /reading` ยังใช้เป็น fallback ได้เสมอ.
 
-ตั้งแต่ v1.0.15 เป็นต้นไป reading ที่มาจาก HA จะเก็บ covariates ที่มีอยู่ลง MariaDB
+ตั้งแต่ v1.0.16 เป็นต้นไป reading ที่มาจาก HA จะเก็บ covariates ที่มีอยู่ลง MariaDB
+และ runtime จะสร้าง illuminance/clear-sky feature พร้อมบันทึก model manifest
+สำหรับตรวจ candidate แบบ shadow ได้ โดยยังไม่เปิดใช้ candidate กับ alert อัตโนมัติ
 และ migration จะเพิ่มคอลัมน์ให้อัตโนมัติ ส่วน NWP hourly log จะเก็บ precipitation,
 weather code, wind และ cloud พร้อม issue/valid time เพื่อทำ as-of join ตอนสร้าง
 feature โดยไม่ให้ forecast ที่ออกภายหลังรั่วเข้าไปในประวัติ.
