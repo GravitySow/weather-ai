@@ -1,5 +1,5 @@
 name: Weather AI
-version: "1.0.19"
+version: "1.0.20"
 slug: weather_ai
 description: Rain warning API using the trained local weather model.
 url: "https://local/weather-ai"

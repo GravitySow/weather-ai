@@ -64,11 +64,12 @@ MQTT broker needed):
 - `sensor.weather_ai_rain_stop_eta` — experimental ETA and p20–p80 remaining-minute
   interval; becomes `unavailable` when history is stale or insufficient
 
-A ready-made dashboard is in `dashboard.yaml` (HA's `sections` view type, requires HA
-2024.9+). Its first section is an at-a-glance Thai live view (rain status, update age,
-model version and 5/10/30/60-minute gauges); the next sections show history, station trend,
-TMD warnings, and clearly labelled experimental radar/cloud signals. Uses only stock HA
-cards, no HACS required.
+A ready-made dashboard is in `dashboard.yaml`. It uses the long-supported `masonry`
+view format (with a top-level `views:` wrapper), so it also works on Home Assistant
+versions that do not support the newer `sections` view type. Its first card is an
+at-a-glance Thai live view (rain status, update age, model version and 5/10/30/60-minute
+gauges); the following cards show history, station trend, TMD warnings, and clearly
+labelled experimental radar/cloud signals. It uses only stock HA cards, no HACS required.
 
 To install: **Settings → Dashboards → + Add Dashboard → New dashboard from scratch**, then
 open the new dashboard's three-dot menu → **Edit Dashboard → three-dot menu → Raw configuration
