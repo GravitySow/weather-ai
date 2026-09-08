@@ -200,14 +200,75 @@ def load_recent_from_db(lookback_minutes=130):
         # mocks may mix those with ISO values that carry an offset.  ``utc=True``
         # handles both without assuming every value is tz-naive.
         db_df["timestamp"] = pd.to_datetime(db_df["timestamp"], errors="coerce", utc=True, format="mixed")
-        for col in ["temp", "humidity", "pressure", "rain_flag"]:
-            db_df[col] = pd.to_numeric(db_df[col], errors="coerce")
-        return _merge_weather_history(
-            db_df.dropna(subset=["timestamp", "temp", "humidity", "pressure", "rain_flag"])
-        )
+        for col in [
+            "temp", "humidity", "pressure", "rain_flag",
+            "wind_available", "wind_speed", "wind_gust", "wind_direction",
+        ]:
+            if col in db_df:
+                db_df[col] = pd.to_numeric(db_df[col], errors="coerce")
+        db_df = db_df.dropna(subset=["timestamp", "temp", "humidity", "pressure", "rain_flag"])
+        return _attach_nwp_features(db_df)
     except Exception:
         logger.exception("Could not load recent readings from DB; continuing with CSV only")
         return _empty_history_frame()
+
+
+def _attach_nwp_features(db_df):
+    """Attach an as-of NWP row to each observed DB timestamp.
+
+    A forecast is eligible only when both its issue time and valid time are
+    no later than the observation.  This prevents a later provider revision
+    from leaking into a historical feature row while still allowing the
+    latest hourly forecast to cover all minute observations in that hour.
+    NWP is optional: a DB/API failure leaves the sensor frame untouched.
+    """
+    if db_df is None or db_df.empty:
+        return db_df
+    try:
+        start = db_df["timestamp"].min() - timedelta(hours=6)
+        end = db_df["timestamp"].max() + timedelta(hours=1)
+        rows = weather_db.get_nwp_forecast_rows(start, end)
+        if not rows:
+            return db_df
+        nwp = pd.DataFrame(rows)
+        nwp = nwp.rename(columns={"issued_hour": "nwp_issued_at", "valid_at": "nwp_valid_at"})
+        nwp["nwp_issued_at"] = pd.to_datetime(nwp["nwp_issued_at"], errors="coerce", utc=True, format="mixed")
+        nwp["nwp_valid_at"] = pd.to_datetime(nwp["nwp_valid_at"], errors="coerce", utc=True, format="mixed")
+        nwp = nwp.dropna(subset=["nwp_issued_at", "nwp_valid_at"]).sort_values(
+            ["nwp_valid_at", "nwp_issued_at"], kind="stable"
+        )
+        if nwp.empty:
+            return db_df
+
+        additions = {}
+        for index, timestamp in db_df["timestamp"].items():
+            eligible = nwp.loc[
+                (nwp["nwp_issued_at"] <= timestamp)
+                & (nwp["nwp_valid_at"] <= timestamp)
+            ]
+            if eligible.empty:
+                continue
+            valid_at = eligible["nwp_valid_at"].max()
+            row = eligible.loc[eligible["nwp_valid_at"] == valid_at].iloc[-1]
+            additions[index] = {
+                "nwp_available": 1.0,
+                "nwp_precipitation_probability": row.get("precipitation_probability"),
+                "nwp_precipitation": row.get("precipitation"),
+                "nwp_weathercode": row.get("weathercode"),
+                "nwp_wind_speed": row.get("wind_speed"),
+                "nwp_wind_direction": row.get("wind_direction"),
+                "nwp_cloud_cover": row.get("cloud_cover"),
+                "nwp_lead_hours": row.get("lead_hours"),
+                "nwp_age_seconds": max(0.0, (timestamp - row["nwp_issued_at"]).total_seconds()),
+            }
+        if additions:
+            extra = pd.DataFrame.from_dict(additions, orient="index")
+            for column in extra.columns:
+                db_df.loc[extra.index, column] = extra[column]
+        return db_df
+    except Exception:
+        logger.exception("Could not attach as-of NWP features; continuing with sensor history")
+        return db_df
 
 
 def load_threshold(thresholds, model_kind, horizon):

@@ -252,6 +252,7 @@ def get_hourly_timeline(hours=24):
             "wind_kmh": hourly.get("wind_speed_10m", [None])[i] if i < len(hourly.get("wind_speed_10m", [])) else None,
             "wind_dir_deg": hourly.get("wind_direction_10m", [None])[i] if i < len(hourly.get("wind_direction_10m", [])) else None,
             "cloud_cover": hourly.get("cloud_cover", [None])[i] if i < len(hourly.get("cloud_cover", [])) else None,
+            "weathercode": hourly.get("weathercode", [None])[i] if i < len(hourly.get("weathercode", [])) else None,
             "condition": _describe_code(hourly["weathercode"][i]) if i < len(hourly.get("weathercode", [])) else None,
         })
     # Every entry gets a stable lead index, even when no bias/interval artifact

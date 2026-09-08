@@ -117,6 +117,18 @@ def init_db():
                 "ALTER TABLE weather_readings ADD COLUMN IF NOT EXISTS cloud_trend_rising BOOLEAN"
             )
             cursor.execute(
+                "ALTER TABLE weather_readings ADD COLUMN IF NOT EXISTS wind_available BOOLEAN"
+            )
+            cursor.execute(
+                "ALTER TABLE weather_readings ADD COLUMN IF NOT EXISTS wind_speed DOUBLE"
+            )
+            cursor.execute(
+                "ALTER TABLE weather_readings ADD COLUMN IF NOT EXISTS wind_gust DOUBLE"
+            )
+            cursor.execute(
+                "ALTER TABLE weather_readings ADD COLUMN IF NOT EXISTS wind_direction DOUBLE"
+            )
+            cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS alert_state (
                     id TINYINT PRIMARY KEY,
@@ -257,6 +269,12 @@ def init_db():
                 "ALTER TABLE nwp_forecast_log ADD COLUMN IF NOT EXISTS temp_forecast_raw DOUBLE",
                 "ALTER TABLE nwp_forecast_log ADD COLUMN IF NOT EXISTS temp_bias_correction DOUBLE",
                 "ALTER TABLE nwp_forecast_log ADD COLUMN IF NOT EXISTS temp_postprocessing VARCHAR(32)",
+                "ALTER TABLE nwp_forecast_log ADD COLUMN IF NOT EXISTS precipitation_probability DOUBLE",
+                "ALTER TABLE nwp_forecast_log ADD COLUMN IF NOT EXISTS precipitation DOUBLE",
+                "ALTER TABLE nwp_forecast_log ADD COLUMN IF NOT EXISTS weathercode INT",
+                "ALTER TABLE nwp_forecast_log ADD COLUMN IF NOT EXISTS wind_speed DOUBLE",
+                "ALTER TABLE nwp_forecast_log ADD COLUMN IF NOT EXISTS wind_direction DOUBLE",
+                "ALTER TABLE nwp_forecast_log ADD COLUMN IF NOT EXISTS cloud_cover DOUBLE",
             ):
                 cursor.execute(statement)
 
@@ -272,6 +290,10 @@ def insert_reading(
     light=None,
     radar=None,
     cloud=None,
+    wind_available=None,
+    wind_speed=None,
+    wind_gust=None,
+    wind_direction=None,
 ):
     """radar/cloud: the dicts returned by radar_nowcast.get_radar_signal() /
     cloud_nowcast.get_cloud_signal(), or None if not fetched. Stored as-is
@@ -279,6 +301,8 @@ def insert_reading(
     against later — see weather_model-findings memory for why this matters."""
     radar = radar or {}
     cloud = cloud or {}
+    if wind_available is None:
+        wind_available = any(value is not None for value in (wind_speed, wind_gust, wind_direction))
 
     with get_connection() as conn:
         with conn.cursor() as cursor:
@@ -286,9 +310,10 @@ def insert_reading(
                 """
                 INSERT IGNORE INTO weather_readings
                     (reading_time, temp, humidity, pressure, rain_flag, rain, rain_sensor, light,
+                     wind_available, wind_speed, wind_gust, wind_direction,
                      radar_available, radar_point_intensity, radar_nearby_max_intensity, radar_trend_rising,
                      cloud_available, cloud_cover_now, cloud_cover_low_now, cloud_trend_rising)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     _normalize_reading_time(reading_time_iso),
@@ -299,6 +324,10 @@ def insert_reading(
                     str(rain),
                     rain_sensor,
                     None if light is None else str(light),
+                    bool(wind_available),
+                    wind_speed,
+                    wind_gust,
+                    wind_direction,
                     radar.get("available", False),
                     radar.get("point_intensity"),
                     radar.get("nearby_max_intensity"),
@@ -339,6 +368,7 @@ def get_readings(start_time, end_time):
             cursor.execute(
                 """
                 SELECT reading_time, temp, humidity, pressure, rain_flag,
+                       wind_available, wind_speed, wind_gust, wind_direction,
                        radar_available, radar_point_intensity, radar_nearby_max_intensity,
                        radar_trend_rising, cloud_available, cloud_cover_now,
                        cloud_cover_low_now, cloud_trend_rising
@@ -421,6 +451,9 @@ def insert_nwp_forecast_log(rows, metadata=None):
             _normalize_reading_time(issued_hour), _normalize_reading_time(valid_at),
             lead_hours, temp_forecast, item.get("temp_forecast_raw"),
             item.get("temp_bias_correction"), item.get("temp_postprocessing"),
+            item.get("precipitation_probability"), item.get("precipitation"),
+            item.get("weathercode"), item.get("wind_speed"),
+            item.get("wind_direction"), item.get("cloud_cover"),
         ))
     rows = normalized
     if not rows:
@@ -432,8 +465,10 @@ def insert_nwp_forecast_log(rows, metadata=None):
                 """
                 INSERT IGNORE INTO nwp_forecast_log (
                     issued_hour, valid_at, lead_hours, temp_forecast,
-                    temp_forecast_raw, temp_bias_correction, temp_postprocessing
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    temp_forecast_raw, temp_bias_correction, temp_postprocessing,
+                    precipitation_probability, precipitation, weathercode,
+                    wind_speed, wind_direction, cloud_cover
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 rows,
             )
@@ -479,7 +514,9 @@ def get_nwp_forecast_rows(start_time=None, end_time=None):
             # calibration only needs the canonical forecast value, so keep the
             # read path compatible without requiring a migration first.
             cursor.execute(
-                "SELECT issued_hour, valid_at, lead_hours, temp_forecast "
+                "SELECT issued_hour, valid_at, lead_hours, temp_forecast, "
+                "precipitation_probability, precipitation, weathercode, "
+                "wind_speed, wind_direction, cloud_cover "
                 f"FROM nwp_forecast_log{where} ORDER BY valid_at, lead_hours",
                 tuple(params),
             )

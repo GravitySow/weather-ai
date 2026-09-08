@@ -42,7 +42,11 @@ def load_features(data_dir="dataset"):
     optional_numeric = [
         "radar_available", "radar_point_intensity", "radar_nearby_max_intensity",
         "radar_trend_rising", "cloud_available", "cloud_cover_now",
-        "cloud_cover_low_now", "cloud_trend_rising",
+        "cloud_cover_low_now", "cloud_trend_rising", "wind_available",
+        "wind_speed", "wind_gust", "wind_direction",
+        "nwp_available", "nwp_precipitation_probability", "nwp_precipitation",
+        "nwp_weathercode", "nwp_wind_speed", "nwp_wind_direction",
+        "nwp_cloud_cover", "nwp_lead_hours", "nwp_age_seconds",
     ]
     # Historical CSV exports may predate the optional radar/cloud columns.
     # Create them as missing values here; ``build_feature_frame`` applies the

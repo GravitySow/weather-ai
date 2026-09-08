@@ -93,6 +93,16 @@ def add_external_nowcast_features(df, features):
     the ``*_available`` and ``*_missing`` indicators prevent zero-filled
     legacy rows from being mistaken for a measured clear sky.
     """
+    wind_available_present = "wind_available" in df
+    nwp_available_present = "nwp_available" in df
+    nwp_probability_valid = (
+        pd.to_numeric(df["nwp_precipitation_probability"], errors="coerce").notna()
+        if "nwp_precipitation_probability" in df else pd.Series(False, index=df.index)
+    )
+    wind_speed_valid = (
+        pd.to_numeric(df["wind_speed"], errors="coerce").notna()
+        if "wind_speed" in df else pd.Series(False, index=df.index)
+    )
     specs = {
         "radar_available": 0.0,
         "radar_point_intensity": 0.0,
@@ -102,6 +112,19 @@ def add_external_nowcast_features(df, features):
         "cloud_cover_now": 0.0,
         "cloud_cover_low_now": 0.0,
         "cloud_trend_rising": 0.0,
+        "wind_available": 0.0,
+        "wind_speed": 0.0,
+        "wind_gust": 0.0,
+        "wind_direction": 0.0,
+        "nwp_available": 0.0,
+        "nwp_precipitation_probability": 0.0,
+        "nwp_precipitation": 0.0,
+        "nwp_weathercode": 0.0,
+        "nwp_wind_speed": 0.0,
+        "nwp_wind_direction": 0.0,
+        "nwp_cloud_cover": 0.0,
+        "nwp_lead_hours": 0.0,
+        "nwp_age_seconds": 999999.0,
     }
     for column, default in specs.items():
         if column not in df:
@@ -109,10 +132,29 @@ def add_external_nowcast_features(df, features):
             continue
         values = df[column]
         if values.dtype == object or str(values.dtype) == "boolean":
-            values = values.astype(str).str.lower().map(
-                {"true": 1.0, "false": 0.0, "1": 1.0, "0": 0.0, "yes": 1.0, "no": 0.0}
-            )
+            normalized = values.astype(str).str.strip().str.lower()
+            direction_map = {
+                "n": 0.0, "nne": 22.5, "ne": 45.0, "ene": 67.5,
+                "e": 90.0, "ese": 112.5, "se": 135.0, "sse": 157.5,
+                "s": 180.0, "ssw": 202.5, "sw": 225.0, "wsw": 247.5,
+                "w": 270.0, "wnw": 292.5, "nw": 315.0, "nnw": 337.5,
+            }
+            if column == "wind_direction":
+                values = normalized.map(direction_map).fillna(normalized)
+            else:
+                values = normalized.map(
+                    {"true": 1.0, "false": 0.0, "1": 1.0, "0": 0.0, "yes": 1.0, "no": 0.0}
+                )
         df[column] = pd.to_numeric(values, errors="coerce").fillna(default)
+
+    if not wind_available_present:
+        # Infer availability for exports that carry wind values but predate
+        # the explicit availability column.
+        df["wind_available"] = wind_speed_valid.astype(float)
+    if not nwp_available_present:
+        # Forecast exports that predate the explicit availability bit can
+        # still be used safely when they contain a probability value.
+        df["nwp_available"] = nwp_probability_valid.astype(float)
 
     for source in ("radar", "cloud"):
         available = df[f"{source}_available"].fillna(0.0).clip(0.0, 1.0)
@@ -126,6 +168,61 @@ def add_external_nowcast_features(df, features):
     features.extend([
         "radar_point_intensity", "radar_nearby_max_intensity", "radar_trend_rising",
         "cloud_cover_now", "cloud_cover_low_now", "cloud_trend_rising",
+    ])
+
+    # Wind is optional and may be absent from older CSV/DB snapshots. Keep an
+    # explicit availability bit so zero-filled legacy rows are not mistaken
+    # for calm air. Meteorological direction is converted to u/v components
+    # (direction the wind comes from), which avoids the 359°/0° discontinuity.
+    wind_available = df["wind_available"].clip(0.0, 1.0)
+    speed = df["wind_speed"].clip(lower=0.0)
+    gust = df["wind_gust"].clip(lower=0.0)
+    speed = speed.where(wind_available > 0.0, 0.0)
+    gust = gust.where(wind_available > 0.0, 0.0)
+    direction = df["wind_direction"].mod(360.0)
+    radians = np.deg2rad(direction)
+    df["wind_available"] = wind_available
+    df["wind_missing"] = (wind_available <= 0.0).astype(float)
+    df["wind_speed_now"] = speed
+    df["wind_gust_now"] = gust
+    df["wind_u_now"] = -speed * np.sin(radians)
+    df["wind_v_now"] = -speed * np.cos(radians)
+    df["wind_direction_sin"] = np.sin(radians).where(wind_available > 0.0, 0.0)
+    df["wind_direction_cos"] = np.cos(radians).where(wind_available > 0.0, 0.0)
+    features.extend([
+        "wind_available", "wind_missing", "wind_speed_now", "wind_gust_now",
+        "wind_u_now", "wind_v_now", "wind_direction_sin", "wind_direction_cos",
+    ])
+
+    nwp_available = df["nwp_available"].clip(0.0, 1.0)
+    nwp_probability = df["nwp_precipitation_probability"].clip(0.0, 100.0)
+    nwp_precipitation = df["nwp_precipitation"].clip(lower=0.0)
+    nwp_wind_speed = df["nwp_wind_speed"].clip(lower=0.0)
+    nwp_wind_direction = df["nwp_wind_direction"].mod(360.0)
+    nwp_radians = np.deg2rad(nwp_wind_direction)
+    # A stale/missing forecast is never represented as a valid zero-valued
+    # forecast.  Keep its values numerically bounded but expose both bits and
+    # age so a candidate model can learn a safe fallback.
+    nwp_probability = nwp_probability.where(nwp_available > 0.0, 0.0)
+    nwp_precipitation = nwp_precipitation.where(nwp_available > 0.0, 0.0)
+    nwp_wind_speed = nwp_wind_speed.where(nwp_available > 0.0, 0.0)
+    nwp_age = df["nwp_age_seconds"].clip(lower=0.0)
+    df["nwp_available"] = nwp_available
+    df["nwp_missing"] = (nwp_available <= 0.0).astype(float)
+    df["nwp_precipitation_probability_now"] = nwp_probability
+    df["nwp_precipitation_now"] = nwp_precipitation
+    df["nwp_weathercode_now"] = df["nwp_weathercode"].clip(lower=0.0).where(nwp_available > 0.0, 0.0)
+    df["nwp_wind_speed_now"] = nwp_wind_speed
+    df["nwp_wind_u_now"] = -nwp_wind_speed * np.sin(nwp_radians)
+    df["nwp_wind_v_now"] = -nwp_wind_speed * np.cos(nwp_radians)
+    df["nwp_cloud_cover_now"] = df["nwp_cloud_cover"].clip(0.0, 100.0).where(nwp_available > 0.0, 0.0)
+    df["nwp_lead_hours_now"] = df["nwp_lead_hours"].clip(lower=0.0).where(nwp_available > 0.0, 0.0)
+    df["nwp_age_seconds_now"] = nwp_age.where(nwp_available > 0.0, 999999.0)
+    features.extend([
+        "nwp_available", "nwp_missing", "nwp_precipitation_probability_now",
+        "nwp_precipitation_now", "nwp_weathercode_now", "nwp_wind_speed_now",
+        "nwp_wind_u_now", "nwp_wind_v_now", "nwp_cloud_cover_now",
+        "nwp_lead_hours_now", "nwp_age_seconds_now",
     ])
 
 
@@ -228,6 +325,9 @@ def build_feature_frame(df):
     # changes without replacing the legacy raw-delta features above.
     add_time_rate_features(
         df, group, ["pressure", "humidity", "temp"], [5, 10, 30], features
+    )
+    add_time_rate_features(
+        df, group, ["wind_speed", "wind_gust"], [10, 30, 60], features
     )
 
     # Short rain history helps distinguish a dry-to-wet transition from a

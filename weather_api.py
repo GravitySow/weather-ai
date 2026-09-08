@@ -162,6 +162,12 @@ class WeatherReading(BaseModel):
     rain: bool | int | float | str | None = None
     rain_sensor: float | int | None = Field(default=None, alias="rainSensor")
     light: float | int | str | dict | None = None
+    # Optional wind covariates.  HA ingestion normalizes speed/gust to m/s;
+    # direct POST callers may provide the same canonical units.
+    wind_available: float | int | bool | None = Field(default=None, alias="windAvailable")
+    wind_speed: float | int | None = Field(default=None, alias="windSpeed")
+    wind_gust: float | int | None = Field(default=None, alias="windGust")
+    wind_direction: float | int | None = Field(default=None, alias="windDirection")
 
 
 def normalize_timestamp(timestamp):
@@ -193,16 +199,34 @@ def append_reading(reading):
         "pressure": reading.pressure,
         "rain": reading.rain if reading.rain is not None else bool(reading.rain_flag),
         "rain_flag": reading.rain_flag,
+        "wind_available": reading.wind_available,
+        "wind_speed": reading.wind_speed,
+        "wind_gust": reading.wind_gust,
+        "wind_direction": reading.wind_direction,
     }
 
     with csv_path.open("a", newline="", encoding="utf-8") as csv_file:
+        fieldnames = [
+            "timestamp", "temp", "humidity", "pressure", "rain", "rain_flag",
+            "wind_available", "wind_speed", "wind_gust", "wind_direction",
+        ]
+        # Existing daily files may have the pre-wind six-column header. Keep
+        # their schema while DB persistence still captures the new fields;
+        # new files use the expanded schema and are fully trainable offline.
+        if file_exists:
+            csv_file.seek(0)
+            header = csv_file.readline().strip()
+            if header:
+                existing_fields = next(csv.reader([header]), [])
+                if existing_fields:
+                    fieldnames = existing_fields
         writer = csv.DictWriter(
             csv_file,
-            fieldnames=["timestamp", "temp", "humidity", "pressure", "rain", "rain_flag"],
+            fieldnames=fieldnames,
         )
         if not file_exists:
             writer.writeheader()
-        writer.writerow(row)
+        writer.writerow({key: row.get(key) for key in fieldnames})
 
     return csv_path, row
 
@@ -234,6 +258,10 @@ def save_reading_to_db(reading, row):
             rain=row["rain"],
             rain_sensor=reading.rain_sensor,
             light=reading.light,
+            wind_available=reading.wind_available,
+            wind_speed=reading.wind_speed,
+            wind_gust=reading.wind_gust,
+            wind_direction=reading.wind_direction,
             radar=radar,
             cloud=cloud,
         )
@@ -445,6 +473,17 @@ def log_nwp_forecast_to_db():
             "temp_postprocessing": "nwp_bias_correction" if entry.get(
                 "temp_bias_correction_enabled"
             ) else "none",
+            "precipitation_probability": entry.get("rain_prob"),
+            "precipitation": entry.get("precip_mm"),
+            "weathercode": entry.get("weathercode"),
+            # Open-Meteo reports wind in km/h; store canonical m/s to match
+            # Home Assistant wind ingestion and the shared feature builder.
+            "wind_speed": (
+                float(entry["wind_kmh"]) / 3.6
+                if entry.get("wind_kmh") is not None else None
+            ),
+            "wind_direction": entry.get("wind_dir_deg"),
+            "cloud_cover": entry.get("cloud_cover"),
         }
 
     if not rows:

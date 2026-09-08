@@ -82,6 +82,9 @@ def _config() -> dict[str, Any]:
         "pressure_entity": _entity("HA_PRESSURE_ENTITY"),
         "rain_entity": _entity("HA_RAIN_ENTITY"),
         "light_entity": _entity("HA_LIGHT_ENTITY"),
+        "wind_speed_entity": _entity("HA_WIND_SPEED_ENTITY"),
+        "wind_gust_entity": _entity("HA_WIND_GUST_ENTITY"),
+        "wind_direction_entity": _entity("HA_WIND_DIRECTION_ENTITY"),
         "poll_seconds": _int_env("HA_POLL_SECONDS", 60),
         "stale_after_seconds": _int_env("HA_STALE_AFTER_SECONDS", 180),
         "api_base": (os.getenv("HA_API_BASE") or "http://supervisor/core/api").rstrip("/"),
@@ -117,7 +120,7 @@ def _configured(config: dict[str, Any]) -> tuple[bool, str | None]:
     for key in ("temp_entity", "humidity_entity", "pressure_entity"):
         if not _entity_valid(config[key]):
             return False, f"invalid_or_missing_{key}"
-    for key in ("rain_entity", "light_entity"):
+    for key in ("rain_entity", "light_entity", "wind_speed_entity", "wind_gust_entity", "wind_direction_entity"):
         if config[key] and not _entity_valid(config[key]):
             return False, f"invalid_{key}"
     if not config["token"]:
@@ -199,6 +202,42 @@ def _pressure(state: dict[str, Any]) -> float | None:
     elif unit not in {"hpa", "mbar", "mb", "hectopascal", "hectopascals", ""}:
         return None
     return value if 700.0 <= value <= 1100.0 else None
+
+
+def _wind_speed(state: dict[str, Any]) -> float | None:
+    """Normalize a Home Assistant wind speed to metres per second."""
+    value = _number(state.get("state"))
+    if value is None:
+        return None
+    unit = str((state.get("attributes") or {}).get("unit_of_measurement") or "m/s").strip().lower()
+    if unit in {"km/h", "kmh", "kph", "kmph"}:
+        value /= 3.6
+    elif unit in {"mph", "mi/h", "mile/h", "miles/h"}:
+        value *= 0.44704
+    elif unit in {"kn", "knot", "knots", "kt"}:
+        value *= 0.5144444444
+    elif unit not in {"m/s", "mps", "ms", "ms-1", "meter/second", "metre/second", ""}:
+        return None
+    return value if 0.0 <= value <= 100.0 else None
+
+
+_WIND_DIRECTION_CARDINALS = {
+    "n": 0.0, "nne": 22.5, "ne": 45.0, "ene": 67.5,
+    "e": 90.0, "ese": 112.5, "se": 135.0, "sse": 157.5,
+    "s": 180.0, "ssw": 202.5, "sw": 225.0, "wsw": 247.5,
+    "w": 270.0, "wnw": 292.5, "nw": 315.0, "nnw": 337.5,
+}
+
+
+def _wind_direction(state: dict[str, Any]) -> float | None:
+    """Normalize numeric or cardinal wind direction to degrees (0..360)."""
+    raw = state.get("state")
+    value = _number(raw)
+    if value is None:
+        value = _WIND_DIRECTION_CARDINALS.get(str(raw or "").strip().lower())
+    if value is None or not math.isfinite(float(value)):
+        return None
+    return float(value) if 0.0 <= float(value) <= 360.0 else None
 
 
 def _rain(state: dict[str, Any]) -> tuple[bool | None, float | None]:
@@ -288,6 +327,12 @@ def fetch_reading(now: datetime | None = None) -> dict[str, Any]:
         entities["rain"] = config["rain_entity"]
     if config["light_entity"]:
         entities["light"] = config["light_entity"]
+    if config["wind_speed_entity"]:
+        entities["wind_speed"] = config["wind_speed_entity"]
+    if config["wind_gust_entity"]:
+        entities["wind_gust"] = config["wind_gust_entity"]
+    if config["wind_direction_entity"]:
+        entities["wind_direction"] = config["wind_direction_entity"]
     try:
         states = {key: _fetch_entity(entity, config) for key, entity in entities.items()}
     except requests.RequestException as exc:
@@ -357,6 +402,14 @@ def fetch_reading(now: datetime | None = None) -> dict[str, Any]:
             _set_status(status="unavailable", reason=reason, last_error=reason, last_error_at_utc=_now_iso(), error_count=_status.get("error_count", 0) + 1)
             return {"status": "unavailable", "reason": reason, "reading": None}
 
+    wind_speed = _wind_speed(states["wind_speed"]) if states.get("wind_speed") else None
+    wind_gust = _wind_speed(states["wind_gust"]) if states.get("wind_gust") else None
+    wind_direction = _wind_direction(states["wind_direction"]) if states.get("wind_direction") else None
+    # Wind is an optional covariate.  Unknown/stale wind must not reject the
+    # core observation; the explicit bit lets feature engineering distinguish
+    # missing data from genuinely calm air.
+    wind_available = any(value is not None for value in (wind_speed, wind_gust, wind_direction))
+
     reading: dict[str, Any] = {
         "timestamp": _now_iso(observation_at),
         "temp": round(temp, 4),
@@ -366,6 +419,10 @@ def fetch_reading(now: datetime | None = None) -> dict[str, Any]:
         "rain_flag": 1.0 if rain_value else 0.0,
         "rain_sensor": rain_sensor,
         "light": _light(states["light"]) if states.get("light") else None,
+        "wind_available": 1.0 if wind_available else 0.0,
+        "wind_speed": round(wind_speed, 4) if wind_speed is not None else None,
+        "wind_gust": round(wind_gust, 4) if wind_gust is not None else None,
+        "wind_direction": round(wind_direction, 4) if wind_direction is not None else None,
     }
     snapshot = {"reading": reading, "timestamps": {key: _now_iso(value) for key, value in timestamps.items()}}
     snapshot_key = hashlib.sha256(json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -477,6 +534,9 @@ def get_source_status() -> dict[str, Any]:
             "pressure": _mask_entity(config["pressure_entity"]),
             "rain": _mask_entity(config["rain_entity"]),
             "light": _mask_entity(config["light_entity"]),
+            "wind_speed": _mask_entity(config["wind_speed_entity"]),
+            "wind_gust": _mask_entity(config["wind_gust_entity"]),
+            "wind_direction": _mask_entity(config["wind_direction_entity"]),
         },
         "token_configured": bool(config["token"]),
     })

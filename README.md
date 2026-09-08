@@ -108,6 +108,11 @@ a connection reset, backs off from 5 to 60 seconds, and honors Telegram's `429`
 เซนเซอร์เหล่านั้นด้วย; ห้ามใช้ entity ที่ขึ้นต้นด้วย `sensor.weather_ai_` หรือ
 `binary_sensor.weather_ai_` เพราะเป็น output ของ add-on เองและจะทำให้เกิด feedback loop.
 
+ถ้ามีข้อมูลลม ให้ระบุเพิ่มได้ด้วย `ha_wind_speed_entity`, `ha_wind_gust_entity` และ
+`ha_wind_direction_entity` (เลือกใช้บางตัวได้) ระบบจะแปลงความเร็วเป็น m/s และทิศทาง
+องศาหรือชื่อทิศ (เช่น `N`, `SW`) เป็นองศาก่อนสร้าง trend features; ค่าที่หายหรือ stale
+จะถูกทำเครื่องหมายว่าไม่มีข้อมูลและไม่ทำให้การอ่านอุณหภูมิหลักล้มเหลว.
+
 Supervisor จะส่ง `SUPERVISOR_TOKEN` ให้อัตโนมัติเมื่อ `homeassistant_api: true` และ
 add-on จะอ่านแบบ read-only จาก `/states/<entity_id>` ทุก `ha_poll_seconds` วินาที
 (ค่าเริ่มต้น 60) ตรวจเวลาของข้อมูลไม่ให้เกิน `ha_stale_after_seconds` (180 วินาที),
@@ -126,6 +131,11 @@ add-on จะอ่านแบบ read-only จาก `/states/<entity_id>` ท
 และ `HA_TOKEN` เป็น long-lived token ผ่าน environment/secret เท่านั้น (ไม่ใส่ token ใน
 `config.yaml` และระบบจะไม่แสดง token ใน log หรือ status). หากไม่กำหนด entity ครบหรือ
 ข้อมูล stale ระบบจะคงข้อมูลเดิมไว้และรอรอบถัดไป; `POST /reading` ยังใช้เป็น fallback ได้เสมอ.
+
+ตั้งแต่ v1.0.14 เป็นต้นไป reading ที่มาจาก HA จะเก็บ wind covariates ลง MariaDB
+และ migration จะเพิ่มคอลัมน์ให้อัตโนมัติ ส่วน NWP hourly log จะเก็บ precipitation,
+weather code, wind และ cloud พร้อม issue/valid time เพื่อทำ as-of join ตอนสร้าง
+feature โดยไม่ให้ forecast ที่ออกภายหลังรั่วเข้าไปในประวัติ.
 
 To backfill existing CSV history into MariaDB, run inside the add-on container:
 
