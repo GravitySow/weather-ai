@@ -14,6 +14,68 @@ import pandas as pd
 # and never a replacement for a calibrated lux sensor.
 DEFAULT_LATITUDE = 13.8692387
 DEFAULT_LONGITUDE = 100.5180519
+SHORT_GAP_MIN_SECONDS = 90.0
+SHORT_GAP_MAX_SECONDS = 150.0
+
+
+def _repair_short_gaps(df):
+    """Insert one synthetic row for a single missed ~1-minute sample.
+
+    The feature matrix is row-based (``shift(5)`` means five minutes), so a
+    two-minute timestamp jump would otherwise make every later lag one minute
+    too old and force a full 120-minute warm-up. A single missing sample is
+    repaired only when the observed gap is between 90 and 150 seconds. Longer
+    gaps still become a new segment and are never forward-filled.
+    """
+    frame = df.reset_index(drop=True).copy()
+    frame["observation_gap_filled"] = 0.0
+    if len(frame) < 2:
+        return frame
+
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce", utc=True, format="mixed")
+    gaps = timestamps.diff().dt.total_seconds().to_numpy()
+    positions = np.flatnonzero(
+        (gaps > SHORT_GAP_MIN_SECONDS) & (gaps <= SHORT_GAP_MAX_SECONDS)
+    )
+    if not len(positions):
+        return frame
+
+    previous = frame.iloc[positions - 1].copy()
+    following = frame.iloc[positions].copy()
+    inserted = previous.copy()
+    left_ts = pd.Series(pd.to_datetime(previous["timestamp"].to_numpy(), errors="coerce", utc=True))
+    right_ts = pd.Series(pd.to_datetime(following["timestamp"].to_numpy(), errors="coerce", utc=True))
+    inserted["timestamp"] = (left_ts + (right_ts - left_ts) / 2).to_numpy()
+
+    numeric_columns = frame.select_dtypes(include=[np.number]).columns.tolist()
+    if numeric_columns:
+        inserted.loc[:, numeric_columns] = (
+            previous[numeric_columns].to_numpy(dtype=float)
+            + following[numeric_columns].to_numpy(dtype=float)
+        ) / 2.0
+
+    # Do not invent a dry-to-wet transition from a missing sample. If either
+    # side says it is raining, preserve that conservative state in the bridge.
+    for column in ("rain_flag", "rain_sensor"):
+        if column in frame.columns:
+            left = pd.to_numeric(previous[column], errors="coerce").to_numpy()
+            right = pd.to_numeric(following[column], errors="coerce").to_numpy()
+            inserted[column] = np.fmax(left, right)
+    if "rain" in frame.columns:
+        inserted["rain"] = (
+            previous["rain"].astype(bool).to_numpy()
+            | following["rain"].astype(bool).to_numpy()
+        )
+    inserted["observation_gap_filled"] = 1.0
+
+    frame["_repair_order"] = np.arange(len(frame), dtype=float) * 2.0
+    inserted["_repair_order"] = (positions - 0.5) * 2.0
+    return (
+        pd.concat([frame, inserted], ignore_index=True, sort=False)
+        .sort_values("_repair_order", kind="stable")
+        .drop(columns="_repair_order")
+        .reset_index(drop=True)
+    )
 
 
 def add_lag_features(df, group, column, windows, features):
@@ -388,11 +450,15 @@ def build_feature_frame(df):
     Expects df with cleaned, numeric, de-duplicated, time-sorted columns:
     timestamp, temp, humidity, pressure, rain_flag.
     """
-    # Row-based lags assume one observation per minute. Allow timestamp jitter,
-    # but restart after missing or duplicated samples instead of silently making
-    # a "30m" feature span 31+ minutes (or less than 30 minutes).
+    # Row-based lags assume one observation per minute. Repair one missed
+    # sample (the common ~2-minute jump from a 60-second poll) before segmenting
+    # so a transient transport hiccup does not suppress predictions for 120m.
+    # Duplicates, clock reversals, and longer gaps still restart the segment.
+    df = _repair_short_gaps(df)
     time_gap = df["timestamp"].diff()
-    irregular = time_gap.lt(pd.Timedelta(seconds=30)) | time_gap.gt(pd.Timedelta(seconds=90))
+    irregular = time_gap.lt(pd.Timedelta(seconds=30)) | time_gap.gt(
+        pd.Timedelta(seconds=SHORT_GAP_MAX_SECONDS)
+    )
     df["segment_id"] = irregular.cumsum()
     group = df.groupby("segment_id", group_keys=False)
 
