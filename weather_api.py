@@ -191,6 +191,11 @@ def append_reading(reading):
     timestamp = normalize_timestamp(reading.timestamp)
     csv_path = csv_path_for(timestamp)
     file_exists = csv_path.exists()
+    wind_available = reading.wind_available
+    if wind_available is None:
+        wind_available = 1.0 if any(
+            value is not None for value in (reading.wind_speed, reading.wind_gust, reading.wind_direction)
+        ) else 0.0
 
     row = {
         "timestamp": timestamp.isoformat(),
@@ -199,7 +204,7 @@ def append_reading(reading):
         "pressure": reading.pressure,
         "rain": reading.rain if reading.rain is not None else bool(reading.rain_flag),
         "rain_flag": reading.rain_flag,
-        "wind_available": reading.wind_available,
+        "wind_available": wind_available,
         "wind_speed": reading.wind_speed,
         "wind_gust": reading.wind_gust,
         "wind_direction": reading.wind_direction,
