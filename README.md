@@ -84,7 +84,11 @@ editor**, and paste in the contents of `dashboard.yaml`.
 Rain alerts are sent to Telegram only on state changes (rain starts/stops, a new
 rain-alert horizon triggers, or an alert clears) — not on every reading — to avoid
 spamming the chat every minute. `alert_cooldown_seconds` adds a durable per-event
-cooldown across restarts. NWP bias correction is opt-in: set
+cooldown across restarts. Rain-start and model-alert messages include the multi-horizon
+probabilities, pressure trend, model version, feature-history coverage, sensor-data age,
+and clearly labelled experimental radar/cloud context when available. Use `/status` in
+Telegram for the same source/model health on demand; `/forecast` includes the quality
+metadata alongside the nowcast. NWP bias correction is opt-in: set
 `nwp_bias_correction_path` to a reviewed JSON artifact; the API keeps both raw
 and corrected hourly temperatures. For calibrated temperature ranges, set
 `nwp_temp_interval_path` to an artifact produced by `train_temperature_intervals.py`

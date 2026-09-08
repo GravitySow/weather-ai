@@ -327,12 +327,14 @@ def notify_rain_state_change(prediction):
             last_notification_kind = kind
         return delivered
 
+    alert_context = telegram_bot.format_prediction_context(prediction)
+
     if is_raining_now and not previous_raining:
         emit(
             "rain_start",
             f"\U0001F327️ ฝนเริ่มตกแล้ว ({prediction['timestamp']})\n"
             f"อุณหภูมิ {prediction['temp']:.1f}°C "
-            f"ความชื้น {prediction['humidity']:.0f}%"
+            f"ความชื้น {prediction['humidity']:.0f}%\n\n{alert_context}"
         )
     elif not is_raining_now and previous_raining:
         emit(
@@ -343,7 +345,7 @@ def notify_rain_state_change(prediction):
     if confirmed_alert and not previous_confirmed:
         emit(
             "ml_alert",
-            f"⚠️ คาดว่าฝนจะตกใน {next_horizon} จากนี้"
+            f"⚠️ คาดว่าฝนจะตกใน {next_horizon} จากนี้\n\n{alert_context}"
         )
     elif not confirmed_alert and previous_confirmed and not is_raining_now:
         emit(

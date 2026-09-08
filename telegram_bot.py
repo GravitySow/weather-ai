@@ -80,6 +80,7 @@ HELP_TEXT = (
     "/daily - สรุปสภาพอากาศวันนี้\n"
     "/weekly - สรุปสภาพอากาศ 7 วันล่าสุด (จากเซ็นเซอร์)\n"
     "/forecast - พยากรณ์ตอนนี้ถึง 6 ชั่วโมงข้างหน้า + วันนี้/คืนนี้\n"
+    "/status - สถานะข้อมูลเซนเซอร์และรุ่นโมเดล\n"
     "/warnings - ประกาศเตือนภัยทางการตามพื้นที่\n"
     "/week - พยากรณ์ล่วงหน้า 7 วัน (Open-Meteo)\n"
     "/help - แสดงข้อความนี้\n\n"
@@ -248,6 +249,96 @@ def _format_daily_highlights(daily):
     )
 
 
+def _format_prediction_quality(prediction):
+    """Human-readable provenance/freshness for a local model result.
+
+    This is deliberately presentational only: the alert decision remains in
+    weather_api's policy path.  Showing model version, feature coverage, and
+    input age makes a Telegram alert diagnosable without opening Home Assistant.
+    """
+    if not prediction:
+        return None
+
+    version = prediction.get("model_version") or "unknown"
+    status = prediction.get("model_status") or "legacy"
+    feature_count = prediction.get("feature_count")
+    confidence = prediction.get("confidence_level") or "unknown"
+    coverage = prediction.get("feature_coverage")
+    age_seconds = prediction.get("data_age_seconds")
+
+    model_detail = f"{_esc(version)} ({_esc(status)})"
+    if feature_count is not None:
+        model_detail += f", {int(feature_count)} features"
+
+    data_bits = [f"confidence {_esc(confidence)}"]
+    if coverage is not None:
+        data_bits.append(f"history {float(coverage) * 100:.0f}%")
+    if age_seconds is not None:
+        data_bits.append(f"age {max(0.0, float(age_seconds)):.0f} วินาที")
+    return f"🧠 โมเดล: {model_detail}\n📶 ข้อมูล: {' · '.join(data_bits)}"
+
+
+def format_prediction_context(prediction, include_experimental=True):
+    """Compact current-nowcast context for an actionable Telegram alert."""
+    predictions = prediction.get("predictions") or {}
+    horizon_bits = []
+    for horizon, item in sorted(predictions.items(), key=lambda pair: int(pair[0].rstrip("m"))):
+        horizon_bits.append(f"{horizon}: {float(item['probability']) * 100:.0f}%")
+
+    lines = [
+        f"🌡️ {float(prediction['temp']):.1f}°C | 💧 {float(prediction['humidity']):.0f}% | "
+        f"HI {float(prediction['heat_index']):.1f}°C ({_esc(prediction['comfort_level'])})",
+        f"📊 โอกาสฝน: {' · '.join(horizon_bits) if horizon_bits else 'ไม่มีข้อมูล'}",
+        f"📉 ความกดอากาศ {float(prediction['pressure']):.1f} hPa "
+        f"แนวโน้ม{_esc(prediction['trend_arrow'])} ({float(prediction['pressure_trend']):+.1f} hPa/ชม.)",
+    ]
+    quality = _format_prediction_quality(prediction)
+    if quality:
+        lines.append(quality)
+
+    if include_experimental:
+        radar = prediction.get("radar") or {}
+        if radar.get("available"):
+            trend = "เพิ่มขึ้น ↑" if radar.get("trend_rising") else "คงที่/ลดลง"
+            lines.append(
+                f"📡 เรดาร์: ใกล้เคียง {radar.get('close_max_intensity', 0)}/4 "
+                f"แนวโน้ม{trend} <i>(ข้อมูลทดลอง)</i>"
+            )
+        cloud = prediction.get("cloud") or {}
+        if cloud.get("available"):
+            trend = "เพิ่มขึ้น ↑" if cloud.get("trend_rising") else "คงที่/ลดลง"
+            lines.append(
+                f"☁️ เมฆ {cloud.get('cloud_cover_now', '-')}% "
+                f"(เมฆต่ำ {cloud.get('cloud_cover_low_now', '-')}%) แนวโน้ม 1ชม.{trend} "
+                "<i>(ข้อมูลทดลอง)</i>"
+            )
+    return "\n".join(lines)
+
+
+def _format_system_status(forecast):
+    """Reply for /status without exposing tokens, URLs, or raw tracebacks."""
+    if not forecast:
+        return "⚠️ Weather AI และแหล่งพยากรณ์ยังไม่พร้อม"
+
+    local = (forecast.get("source_status") or {}).get("local") or {}
+    nwp = (forecast.get("source_status") or {}).get("nwp") or {}
+    lines = ["⚙️ <b>สถานะ Weather AI</b>"]
+    now = forecast.get("now")
+    if now:
+        quality = _format_prediction_quality(now)
+        if quality:
+            lines.append(quality)
+        lines.append(f"🕒 ข้อมูลเซนเซอร์: {_esc(now.get('timestamp') or 'ไม่ระบุ')}")
+    else:
+        reason = local.get("reason") or "ยังไม่มีข้อมูลต่อเนื่องเพียงพอ"
+        lines.append(f"⚠️ Local model: ไม่พร้อม ({_esc(reason)})")
+
+    lines.append(f"🌐 NWP: {_esc(nwp.get('status') or 'unavailable')}")
+    if forecast.get("arrival"):
+        lines.append("📡 เรดาร์ตรวจพบสัญญาณฝนกำลังเข้า <i>(ข้อมูลทดลอง)</i>")
+    return "\n".join(lines)
+
+
 def _format_nowcast_card(forecast):
     """"Now" + next-2h nowcast + radar arrival ETA, built from
     forecast_service.get_forecast()'s blended object — see plan.md Phase 3/4."""
@@ -274,6 +365,10 @@ def _format_nowcast_card(forecast):
     )
     if nowcast_bits:
         lines.append(f"โอกาสฝน: {nowcast_bits}")
+
+    quality = _format_prediction_quality(now)
+    if quality:
+        lines.append(quality)
 
     arrival = forecast.get("arrival")
     if arrival:
@@ -430,19 +525,10 @@ def _format_sensor_nowcast(include_weekly_pressure_trend=False):
         logger.exception("Failed to build sensor nowcast")
         return None
 
-    horizon_bits = ", ".join(
-        f"{horizon}: {pred['probability'] * 100:.0f}%"
-        for horizon, pred in result["predictions"].items()
-    )
-
     lines = [
         "\U0001F4E1 <b>จากเซ็นเซอร์เรา (ตอนนี้)</b>",
-        f"\U0001F321️ {result['temp']:.1f}°C | \U0001F4A7 {result['humidity']:.0f}% | "
-        f"\U0001F525 HI {result['heat_index']:.1f}°C ({_esc(result['comfort_level'])})",
         "\U0001F327️ กำลังฝนตก" if result["is_raining_now"] else "☀️ ไม่มีฝนตอนนี้",
-        f"โอกาสฝน (nowcast): {horizon_bits}",
-        f"\U0001F4CA ความกดอากาศ {result['pressure']:.1f} hPa "
-        f"แนวโน้ม{result['trend_arrow']} ({result['pressure_trend']:+.1f} hPa/ชม.)",
+        format_prediction_context(result),
     ]
     if include_weekly_pressure_trend:
         weekly_line = _pressure_weekly_trend(result["pressure"])
@@ -450,22 +536,6 @@ def _format_sensor_nowcast(include_weekly_pressure_trend=False):
             lines.append(weekly_line)
     if result["any_rain_alert"]:
         lines.append(f"⚠️ {result['alert_message']}")
-
-    radar = result.get("radar") or {}
-    if radar.get("available"):
-        trend = "เพิ่มขึ้น ↑" if radar.get("trend_rising") else "คงที่/ลดลง"
-        lines.append(
-            f"\U0001F4E1 เรดาร์: ฝนใกล้เคียง (25กม.) ระดับ {radar['close_max_intensity']}/4 "
-            f"แนวโน้ม{trend} (สัญญาณทดลอง, RainViewer)"
-        )
-
-    cloud = result.get("cloud") or {}
-    if cloud.get("available"):
-        trend = "เพิ่มขึ้น ↑" if cloud.get("trend_rising") else "คงที่/ลดลง"
-        lines.append(
-            f"☁️ เมฆ: {cloud['cloud_cover_now']}% (เมฆต่ำ {cloud['cloud_cover_low_now']}%) "
-            f"แนวโน้ม 1ชม.{trend} (สัญญาณทดลอง)"
-        )
 
     return "\n".join(lines)
 
@@ -519,6 +589,13 @@ def handle_command(text):
             if text
         ]
         return "\n\n".join(parts) if parts else "⚠️ ดึงพยากรณ์ไม่สำเร็จ"
+
+    if command == "/status":
+        try:
+            return _format_system_status(forecast_service.get_forecast())
+        except Exception:
+            logger.exception("Failed to build /status response")
+            return "⚠️ ดึงสถานะ Weather AI ไม่สำเร็จ"
 
     if command == "/warnings":
         try:
