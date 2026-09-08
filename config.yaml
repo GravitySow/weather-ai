@@ -1,5 +1,5 @@
 name: Weather AI
-version: "1.0.14"
+version: "1.0.15"
 slug: weather_ai
 description: Rain warning API using the trained local weather model.
 url: "https://local/weather-ai"
@@ -38,9 +38,6 @@ options:
   ha_pressure_entity: ""
   ha_rain_entity: ""
   ha_light_entity: ""
-  ha_wind_speed_entity: ""
-  ha_wind_gust_entity: ""
-  ha_wind_direction_entity: ""
   ha_poll_seconds: 60
   ha_stale_after_seconds: 180
   ha_api_base: ""
@@ -68,9 +65,6 @@ schema:
   ha_pressure_entity: str?
   ha_rain_entity: str?
   ha_light_entity: str?
-  ha_wind_speed_entity: str?
-  ha_wind_gust_entity: str?
-  ha_wind_direction_entity: str?
   ha_poll_seconds: int?
   ha_stale_after_seconds: int?
   ha_api_base: str?
