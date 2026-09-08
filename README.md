@@ -65,10 +65,10 @@ MQTT broker needed):
   interval; becomes `unavailable` when history is stale or insufficient
 
 A ready-made dashboard is in `dashboard.yaml` (HA's `sections` view type, requires HA
-2024.9+) — a hero card (current temp/humidity/heat index + rain status in Thai), gauges for
-the 5m/10m/30m rain probability, glance cards for current conditions and pressure trend/dew
-point, an alert-status card, and 24h history graphs. Uses only stock HA cards, no HACS
-required.
+2024.9+). Its first section is an at-a-glance Thai live view (rain status, update age,
+model version and 5/10/30/60-minute gauges); the next sections show history, station trend,
+TMD warnings, and clearly labelled experimental radar/cloud signals. Uses only stock HA
+cards, no HACS required.
 
 To install: **Settings → Dashboards → + Add Dashboard → New dashboard from scratch**, then
 open the new dashboard's three-dot menu → **Edit Dashboard → three-dot menu → Raw configuration
