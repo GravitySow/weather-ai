@@ -1,219 +1,112 @@
 views:
-  - title: Weather AI Live
+  - title: Weather AI
     path: weather-ai
     icon: mdi:weather-partly-rainy
     type: masonry
     cards:
-      # --- ภาพรวม: ใช้ตัดสินใจในไม่กี่วินาที ---
+      - type: markdown
+        content: >
+          {% if is_state('binary_sensor.weather_ai_raining_now', 'on') %}
+          # 🌧️ กำลังมีฝนตก
+          {% elif is_state('binary_sensor.weather_ai_rain_alert', 'on') %}
+          # ⚠️ มีโอกาสฝนเข้า
+          {% else %}
+          # ☀️ ตอนนี้ยังไม่มีสัญญาณเตือนฝน
+          {% endif %}
+
+          **อุณหภูมิ {{ states('sensor.weather_ai_temperature') }}°C** ·
+          💧 **ความชื้น {{ states('sensor.weather_ai_humidity') }}%** ·
+          🥵 **Heat Index {{ states('sensor.weather_ai_heat_index') }}°C**
+
+          <sub>Prediction ล่าสุด:
+          {{ states('sensor.weather_ai_last_update') }}</sub>
+
       - type: grid
+        columns: 3
+        square: false
         cards:
-          - type: markdown
-            content: >
-              {% set heartbeat = states('sensor.weather_ai_last_update') %}
-              {% set heartbeat_ts = as_timestamp(heartbeat, none) %}
-              {% set model = state_attr('sensor.weather_ai_last_update', 'model_version') %}
-              {% set confidence = state_attr('sensor.weather_ai_rain_probability_5m', 'confidence_level') %}
-              {% set age_min = ((as_timestamp(now()) - heartbeat_ts) / 60) | round(0) if heartbeat_ts is not none else none %}
-              {% if age_min is not none and age_min < 0 %}{% set age_min = 0 %}{% endif %}
+          - type: gauge
+            entity: sensor.weather_ai_rain_probability_5m
+            name: ฝน 5 นาที
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 30
+              red: 60
+          - type: gauge
+            entity: sensor.weather_ai_rain_probability_10m
+            name: ฝน 10 นาที
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 30
+              red: 60
+          - type: gauge
+            entity: sensor.weather_ai_rain_probability_30m
+            name: ฝน 30 นาที
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 30
+              red: 60
 
-              {% if is_state('binary_sensor.weather_ai_raining_now', 'on') %}
-              # 🌧️ กำลังมีฝนตก
-              ตรวจดู Rain stop ETA และเรดาร์ด้านล่างเพื่อประกอบการตัดสินใจ
-              {% elif is_state('binary_sensor.weather_ai_rain_alert', 'on') %}
-              # ⚠️ มีโอกาสฝนเข้า
-              โมเดลแจ้งเตือนที่ระยะ {{ state_attr('binary_sensor.weather_ai_rain_alert', 'next_rain_alert_horizon') }}
-              {% else %}
-              # ☀️ ตอนนี้ยังไม่มีสัญญาณเตือนฝน
-              ติดตามแนวโน้ม 5–30 นาทีด้านขวา
-              {% endif %}
+      - type: glance
+        title: สภาพอากาศปัจจุบัน
+        columns: 4
+        entities:
+          - entity: sensor.weather_ai_temperature
+            name: อุณหภูมิ
+          - entity: sensor.weather_ai_humidity
+            name: ความชื้น
+          - entity: sensor.weather_ai_pressure
+            name: ความกดอากาศ
+          - entity: sensor.weather_ai_heat_index
+            name: Heat Index
 
-              **{{ states('sensor.weather_ai_temperature') }}°C** ·
-              💧 **{{ states('sensor.weather_ai_humidity') }}%** ·
-              🥵 Heat Index **{{ states('sensor.weather_ai_heat_index') }}°C**
+      - type: entities
+        title: สถานะ Weather AI
+        entities:
+          - entity: binary_sensor.weather_ai_raining_now
+            name: ฝนกำลังตก
+          - entity: binary_sensor.weather_ai_rain_alert
+            name: แจ้งเตือนฝน
+          - entity: sensor.weather_ai_last_update
+            name: Prediction ล่าสุด
+          - entity: sensor.weather_ai_dew_point
+            name: จุดน้ำค้าง
+          - entity: sensor.weather_ai_pressure_trend
+            name: แนวโน้มความกดอากาศ
+          - entity: sensor.weather_ai_trend_arrow
+            name: ทิศทางความกดอากาศ
 
-              {% if heartbeat_ts is not none %}
-              <sub>คำนวณล่าสุด {{ heartbeat_ts | timestamp_custom('%H:%M:%S', true) }} น. ·
-              {{ age_min }} นาทีที่แล้ว ·
-              model: {{ model or 'unknown' }} · confidence: {{ confidence or 'unknown' }}</sub>
-              {% else %}
-              <sub>กำลังรอ prediction แรกจาก Weather AI</sub>
-              {% endif %}
+      - type: history-graph
+        title: โอกาสฝนย้อนหลัง 12 ชั่วโมง
+        hours_to_show: 12
+        entities:
+          - entity: sensor.weather_ai_rain_probability_5m
+            name: 5 นาที
+          - entity: sensor.weather_ai_rain_probability_10m
+            name: 10 นาที
+          - entity: sensor.weather_ai_rain_probability_30m
+            name: 30 นาที
 
-          - type: grid
-            columns: 4
-            square: false
-            cards:
-              - type: gauge
-                entity: sensor.weather_ai_rain_probability_5m
-                name: ฝน 5 นาที
-                min: 0
-                max: 100
-                needle: true
-                severity: {green: 0, yellow: 30, red: 60}
+      - type: history-graph
+        title: อุณหภูมิและความชื้นย้อนหลัง 24 ชั่วโมง
+        hours_to_show: 24
+        entities:
+          - entity: sensor.weather_ai_temperature
+            name: อุณหภูมิ
+          - entity: sensor.weather_ai_humidity
+            name: ความชื้น
 
-              - type: gauge
-                entity: sensor.weather_ai_rain_probability_10m
-                name: ฝน 10 นาที
-                min: 0
-                max: 100
-                needle: true
-                severity: {green: 0, yellow: 30, red: 60}
+      - type: markdown
+        content: >
+          ### วิธีอ่านหน้านี้
 
-              - type: gauge
-                entity: sensor.weather_ai_rain_probability_30m
-                name: ฝน 30 นาที
-                min: 0
-                max: 100
-                needle: true
-                severity: {green: 0, yellow: 30, red: 60}
-
-              - type: gauge
-                entity: sensor.weather_ai_rain_probability_60m
-                name: ฝน 60 นาที
-                min: 0
-                max: 100
-                needle: true
-                severity: {green: 0, yellow: 30, red: 60}
-
-          - type: glance
-            title: สภาพอากาศ ณ สถานี
-            columns: 4
-            show_state: true
-            entities:
-              - entity: sensor.weather_ai_temperature
-                name: อุณหภูมิ
-                icon: mdi:thermometer
-              - entity: sensor.weather_ai_humidity
-                name: ความชื้น
-                icon: mdi:water-percent
-              - entity: sensor.weather_ai_pressure
-                name: ความกดอากาศ
-                icon: mdi:gauge
-              - entity: sensor.weather_ai_dew_point
-                name: จุดน้ำค้าง
-                icon: mdi:water-thermometer
-
-          - type: entities
-            title: สถานะและความน่าเชื่อถือ
-            show_header_toggle: false
-            entities:
-              - entity: binary_sensor.weather_ai_raining_now
-                name: ฝนกำลังตก
-              - entity: binary_sensor.weather_ai_rain_alert
-                name: แจ้งเตือนฝน
-              - type: attribute
-                entity: binary_sensor.weather_ai_rain_alert
-                attribute: next_rain_alert_horizon
-                name: ระยะที่แจ้งเตือน
-              - entity: sensor.weather_ai_last_update
-                name: Prediction ล่าสุด
-              - type: attribute
-                entity: sensor.weather_ai_last_update
-                attribute: source_observation_at_utc
-                name: ข้อมูลเซนเซอร์ล่าสุด
-              - type: attribute
-                entity: sensor.weather_ai_last_update
-                attribute: model_version
-                name: รุ่นโมเดล
-
-      # --- แนวโน้ม: อ่านทิศทางก่อนตัดสินใจ ---
-      - type: grid
-        cards:
-          - type: history-graph
-            title: โอกาสฝนย้อนหลัง 12 ชั่วโมง
-            hours_to_show: 12
-            entities:
-              - entity: sensor.weather_ai_rain_probability_5m
-                name: 5 นาที
-              - entity: sensor.weather_ai_rain_probability_10m
-                name: 10 นาที
-              - entity: sensor.weather_ai_rain_probability_30m
-                name: 30 นาที
-              - entity: sensor.weather_ai_rain_probability_60m
-                name: 60 นาที
-
-          - type: history-graph
-            title: อุณหภูมิและความชื้นย้อนหลัง 24 ชั่วโมง
-            hours_to_show: 24
-            entities:
-              - entity: sensor.weather_ai_temperature
-                name: อุณหภูมิ
-              - entity: sensor.weather_ai_humidity
-                name: ความชื้น
-
-          - type: entities
-            title: แนวโน้มของสถานี
-            show_header_toggle: false
-            entities:
-              - entity: sensor.weather_ai_pressure_trend
-                name: ความกดอากาศเปลี่ยนต่อชั่วโมง
-                icon: mdi:chart-line
-              - entity: sensor.weather_ai_trend_arrow
-                name: ทิศทางความกดอากาศ
-              - entity: sensor.weather_ai_heat_index
-                name: Heat Index
-              - type: attribute
-                entity: sensor.weather_ai_heat_index
-                attribute: comfort_level
-                name: ระดับความร้อน
-              - entity: sensor.weather_ai_rain_probability_120m
-                name: โอกาสฝนใน 120 นาที
-                icon: mdi:weather-pouring
-
-      # --- สัญญาณประกอบ: แสดงให้ตรวจสอบ แต่ยังไม่ใช้แทนการแจ้งเตือนของโมเดล ---
-      - type: grid
-        cards:
-          - type: entities
-            title: สัญญาณเรดาร์และเมฆ (โหมดทดลอง)
-            show_header_toggle: false
-            entities:
-              - entity: sensor.weather_ai_radar_intensity
-                name: ความแรงฝนเหนือสถานี
-                icon: mdi:radar
-              - entity: binary_sensor.weather_ai_radar_nearby
-                name: พบฝนใกล้เคียง
-              - entity: binary_sensor.weather_ai_radar_arriving
-                name: ฝนกำลังเคลื่อนเข้า
-              - type: attribute
-                entity: binary_sensor.weather_ai_radar_arriving
-                attribute: eta_minutes
-                name: คาดถึงใน (นาที)
-              - type: attribute
-                entity: binary_sensor.weather_ai_radar_arriving
-                attribute: confidence
-                name: ความเชื่อมั่นเรดาร์
-              - entity: sensor.weather_ai_cloud_cover
-                name: เมฆปกคลุม
-                icon: mdi:cloud
-              - entity: binary_sensor.weather_ai_cloud_rising
-                name: เมฆเพิ่มขึ้น
-
-          - type: entities
-            title: การเตือนและฝนหยุด
-            show_header_toggle: false
-            entities:
-              - entity: binary_sensor.weather_ai_tmd_warning
-                name: คำเตือนกรมอุตุฯ
-              - entity: sensor.weather_ai_tmd_warning_count
-                name: จำนวนคำเตือนที่มีผล
-              - type: attribute
-                entity: binary_sensor.weather_ai_tmd_warning
-                attribute: severity
-                name: ระดับคำเตือน
-              - type: attribute
-                entity: binary_sensor.weather_ai_tmd_warning
-                attribute: expires
-                name: หมดอายุ
-              - entity: sensor.weather_ai_rain_stop_eta
-                name: เวลาที่คาดว่าฝนจะหยุด
-
-          - type: markdown
-            content: >
-              ### วิธีอ่านหน้านี้
-
-              1. ดู **5 / 10 / 30 นาที** ก่อนเสมอ — เป็นระยะที่ใช้กับการแจ้งเตือน
-              2. หากค่าเพิ่มขึ้นพร้อมกันหลายระยะ ให้ดูเรดาร์และเมฆประกอบ
-              3. ถ้า `Prediction ล่าสุด` เก่าเกิน 3 นาที ให้ถือว่าค่า AI ยังไม่สด
-              4. สัญญาณเรดาร์/เมฆ และ ETA ฝนหยุดเป็นข้อมูลทดลอง ยังไม่ควรใช้แทนการแจ้งเตือนหลัก
-
-              <sub>ใช้เฉพาะ Home Assistant built-in cards — ไม่ต้องติดตั้ง HACS หรือ custom card</sub>
+          1. ดูโอกาสฝน 5 / 10 / 30 นาทีก่อน
+          2. ถ้าค่าเพิ่มขึ้นพร้อมกันหลายระยะ ให้เตรียมรับฝน
+          3. ตรวจ Prediction ล่าสุด หากเกิน 3 นาทีให้ถือว่าข้อมูลไม่สด
+          4. สัญญาณแจ้งเตือนจะรอการยืนยันหลายรอบเพื่อกัน sensor กระพริบ

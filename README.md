@@ -66,10 +66,11 @@ MQTT broker needed):
 
 A ready-made dashboard is in `dashboard.yaml`. It uses the long-supported `masonry`
 view format (with a top-level `views:` wrapper), so it also works on Home Assistant
-versions that do not support the newer `sections` view type. Its first card is an
-at-a-glance Thai live view (rain status, update age, model version and 5/10/30/60-minute
-gauges); the following cards show history, station trend, TMD warnings, and clearly
-labelled experimental radar/cloud signals. It uses only stock HA cards, no HACS required.
+versions that do not support the newer `sections` view type. The compatibility version
+uses only the core entities that every Weather AI prediction publishes (rain status,
+5/10/30-minute probabilities, station values and history); optional radar/cloud/TMD
+entities are deliberately omitted so an older HA instance can save the YAML even before
+those entities have been created. It uses only stock HA cards, no HACS required.
 
 To install: **Settings → Dashboards → + Add Dashboard → New dashboard from scratch**, then
 open the new dashboard's three-dot menu → **Edit Dashboard → three-dot menu → Raw configuration
