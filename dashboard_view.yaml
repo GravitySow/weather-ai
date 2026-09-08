@@ -1,0 +1,112 @@
+- title: Weather AI
+  path: weather-ai
+  icon: mdi:weather-partly-rainy
+  type: masonry
+  cards:
+    - type: markdown
+      content: >
+        {% if is_state('binary_sensor.weather_ai_raining_now', 'on') %}
+        # 🌧️ กำลังมีฝนตก
+        {% elif is_state('binary_sensor.weather_ai_rain_alert', 'on') %}
+        # ⚠️ มีโอกาสฝนเข้า
+        {% else %}
+        # ☀️ ตอนนี้ยังไม่มีสัญญาณเตือนฝน
+        {% endif %}
+
+        **อุณหภูมิ {{ states('sensor.weather_ai_temperature') }}°C** ·
+        💧 **ความชื้น {{ states('sensor.weather_ai_humidity') }}%** ·
+        🥵 **Heat Index {{ states('sensor.weather_ai_heat_index') }}°C**
+
+        <sub>Prediction ล่าสุด:
+        {{ states('sensor.weather_ai_last_update') }}</sub>
+
+    - type: grid
+      columns: 3
+      square: false
+      cards:
+        - type: gauge
+          entity: sensor.weather_ai_rain_probability_5m
+          name: ฝน 5 นาที
+          min: 0
+          max: 100
+          severity:
+            green: 0
+            yellow: 30
+            red: 60
+        - type: gauge
+          entity: sensor.weather_ai_rain_probability_10m
+          name: ฝน 10 นาที
+          min: 0
+          max: 100
+          severity:
+            green: 0
+            yellow: 30
+            red: 60
+        - type: gauge
+          entity: sensor.weather_ai_rain_probability_30m
+          name: ฝน 30 นาที
+          min: 0
+          max: 100
+          severity:
+            green: 0
+            yellow: 30
+            red: 60
+
+    - type: glance
+      title: สภาพอากาศปัจจุบัน
+      columns: 4
+      entities:
+        - entity: sensor.weather_ai_temperature
+          name: อุณหภูมิ
+        - entity: sensor.weather_ai_humidity
+          name: ความชื้น
+        - entity: sensor.weather_ai_pressure
+          name: ความกดอากาศ
+        - entity: sensor.weather_ai_heat_index
+          name: Heat Index
+
+    - type: entities
+      title: สถานะ Weather AI
+      entities:
+        - entity: binary_sensor.weather_ai_raining_now
+          name: ฝนกำลังตก
+        - entity: binary_sensor.weather_ai_rain_alert
+          name: แจ้งเตือนฝน
+        - entity: sensor.weather_ai_last_update
+          name: Prediction ล่าสุด
+        - entity: sensor.weather_ai_dew_point
+          name: จุดน้ำค้าง
+        - entity: sensor.weather_ai_pressure_trend
+          name: แนวโน้มความกดอากาศ
+        - entity: sensor.weather_ai_trend_arrow
+          name: ทิศทางความกดอากาศ
+
+    - type: history-graph
+      title: โอกาสฝนย้อนหลัง 12 ชั่วโมง
+      hours_to_show: 12
+      entities:
+        - entity: sensor.weather_ai_rain_probability_5m
+          name: 5 นาที
+        - entity: sensor.weather_ai_rain_probability_10m
+          name: 10 นาที
+        - entity: sensor.weather_ai_rain_probability_30m
+          name: 30 นาที
+
+    - type: history-graph
+      title: อุณหภูมิและความชื้นย้อนหลัง 24 ชั่วโมง
+      hours_to_show: 24
+      entities:
+        - entity: sensor.weather_ai_temperature
+          name: อุณหภูมิ
+        - entity: sensor.weather_ai_humidity
+          name: ความชื้น
+
+    - type: markdown
+      content: >
+        ### วิธีอ่านหน้านี้
+
+        1. ดูโอกาสฝน 5 / 10 / 30 นาทีก่อน
+        2. ถ้าค่าเพิ่มขึ้นพร้อมกันหลายระยะ ให้เตรียมรับฝน
+        3. ตรวจ Prediction ล่าสุด หากเกิน 3 นาทีให้ถือว่าข้อมูลไม่สด
+        4. สัญญาณแจ้งเตือนจะรอการยืนยันหลายรอบเพื่อกัน sensor กระพริบ
+

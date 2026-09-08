@@ -76,6 +76,10 @@ To install: **Settings → Dashboards → + Add Dashboard → New dashboard from
 open the new dashboard's three-dot menu → **Edit Dashboard → three-dot menu → Raw configuration
 editor**, and paste in the contents of `dashboard.yaml`.
 
+If you already have a large dashboard with an existing `views:` list, do not paste the
+full file inside another `views:` key. Replace or append one view item using
+`dashboard_view.yaml` (it starts with `- title: Weather AI`) under the existing `views:` list.
+
 ## Configuration options
 
 - `db_host`, `db_port`, `db_user`, `db_password`, `db_name` — MariaDB connection.
