@@ -15,17 +15,18 @@ import pandas as pd
 DEFAULT_LATITUDE = 13.8692387
 DEFAULT_LONGITUDE = 100.5180519
 SHORT_GAP_MIN_SECONDS = 90.0
-SHORT_GAP_MAX_SECONDS = 150.0
+SHORT_GAP_MAX_SECONDS = 330.0
+NOMINAL_SAMPLE_SECONDS = 60.0
 
 
 def _repair_short_gaps(df):
-    """Insert one synthetic row for a single missed ~1-minute sample.
+    """Insert synthetic minute rows for a short sensor-history gap.
 
     The feature matrix is row-based (``shift(5)`` means five minutes), so a
-    two-minute timestamp jump would otherwise make every later lag one minute
-    too old and force a full 120-minute warm-up. A single missing sample is
-    repaired only when the observed gap is between 90 and 150 seconds. Longer
-    gaps still become a new segment and are never forward-filled.
+    timestamp jump would otherwise make every later lag too old and force a
+    full 120-minute warm-up. Gaps up to five minutes (with a small timestamp
+    jitter allowance) are repaired with one interpolated row per missing
+    minute. Longer gaps still become a new segment and are never filled.
     """
     frame = df.reset_index(drop=True).copy()
     frame["observation_gap_filled"] = 0.0
@@ -33,49 +34,71 @@ def _repair_short_gaps(df):
         return frame
 
     timestamps = pd.to_datetime(frame["timestamp"], errors="coerce", utc=True, format="mixed")
-    gaps = timestamps.diff().dt.total_seconds().to_numpy()
-    positions = np.flatnonzero(
-        (gaps > SHORT_GAP_MIN_SECONDS) & (gaps <= SHORT_GAP_MAX_SECONDS)
-    )
-    if not len(positions):
+    numeric_columns = [
+        column for column in frame.select_dtypes(include=[np.number]).columns
+        if column not in {"observation_gap_filled", "segment_id"}
+    ]
+    repaired_rows = []
+    repaired_any = False
+
+    for index in range(len(frame) - 1):
+        previous = frame.iloc[index].copy()
+        following = frame.iloc[index + 1].copy()
+        repaired_rows.append(previous)
+        left_ts = timestamps.iloc[index]
+        right_ts = timestamps.iloc[index + 1]
+        gap_seconds = (right_ts - left_ts).total_seconds()
+        if not (
+            gap_seconds > SHORT_GAP_MIN_SECONDS
+            and gap_seconds <= SHORT_GAP_MAX_SECONDS
+        ):
+            continue
+
+        # Round to the expected one-minute cadence, then insert every missing
+        # slot rather than a single midpoint. This preserves row-based lags
+        # for a gap of two to five minutes.
+        missing_count = max(1, int(round(gap_seconds / NOMINAL_SAMPLE_SECONDS)) - 1)
+        repaired_any = True
+        for slot in range(1, missing_count + 1):
+            fraction = slot / (missing_count + 1)
+            inserted = previous.copy()
+            inserted["timestamp"] = left_ts + (right_ts - left_ts) * fraction
+
+            for column in numeric_columns:
+                left_value = pd.to_numeric(previous[column], errors="coerce")
+                right_value = pd.to_numeric(following[column], errors="coerce")
+                if pd.notna(left_value) and pd.notna(right_value):
+                    inserted[column] = left_value + (right_value - left_value) * fraction
+                elif pd.notna(left_value):
+                    inserted[column] = left_value
+                else:
+                    inserted[column] = right_value
+
+            # Preserve non-numeric context from the nearest valid observation.
+            for column in frame.columns:
+                if column not in numeric_columns and column not in {
+                    "timestamp", "observation_gap_filled", "segment_id",
+                }:
+                    inserted[column] = (
+                        previous[column] if pd.notna(previous[column]) else following[column]
+                    )
+
+            # Do not invent a dry-to-wet transition. If either side says it is
+            # raining, preserve that conservative state in every bridge row.
+            for column in ("rain_flag", "rain_sensor"):
+                if column in frame.columns:
+                    left_value = pd.to_numeric(previous[column], errors="coerce")
+                    right_value = pd.to_numeric(following[column], errors="coerce")
+                    inserted[column] = np.nanmax([left_value, right_value])
+            if "rain" in frame.columns:
+                inserted["rain"] = bool(previous["rain"]) or bool(following["rain"])
+            inserted["observation_gap_filled"] = 1.0
+            repaired_rows.append(inserted)
+
+    repaired_rows.append(frame.iloc[-1].copy())
+    if not repaired_any:
         return frame
-
-    previous = frame.iloc[positions - 1].copy()
-    following = frame.iloc[positions].copy()
-    inserted = previous.copy()
-    left_ts = pd.Series(pd.to_datetime(previous["timestamp"].to_numpy(), errors="coerce", utc=True))
-    right_ts = pd.Series(pd.to_datetime(following["timestamp"].to_numpy(), errors="coerce", utc=True))
-    inserted["timestamp"] = (left_ts + (right_ts - left_ts) / 2).to_numpy()
-
-    numeric_columns = frame.select_dtypes(include=[np.number]).columns.tolist()
-    if numeric_columns:
-        inserted.loc[:, numeric_columns] = (
-            previous[numeric_columns].to_numpy(dtype=float)
-            + following[numeric_columns].to_numpy(dtype=float)
-        ) / 2.0
-
-    # Do not invent a dry-to-wet transition from a missing sample. If either
-    # side says it is raining, preserve that conservative state in the bridge.
-    for column in ("rain_flag", "rain_sensor"):
-        if column in frame.columns:
-            left = pd.to_numeric(previous[column], errors="coerce").to_numpy()
-            right = pd.to_numeric(following[column], errors="coerce").to_numpy()
-            inserted[column] = np.fmax(left, right)
-    if "rain" in frame.columns:
-        inserted["rain"] = (
-            previous["rain"].astype(bool).to_numpy()
-            | following["rain"].astype(bool).to_numpy()
-        )
-    inserted["observation_gap_filled"] = 1.0
-
-    frame["_repair_order"] = np.arange(len(frame), dtype=float) * 2.0
-    inserted["_repair_order"] = (positions - 0.5) * 2.0
-    return (
-        pd.concat([frame, inserted], ignore_index=True, sort=False)
-        .sort_values("_repair_order", kind="stable")
-        .drop(columns="_repair_order")
-        .reset_index(drop=True)
-    )
+    return pd.DataFrame(repaired_rows, columns=frame.columns).reset_index(drop=True)
 
 
 def add_lag_features(df, group, column, windows, features):

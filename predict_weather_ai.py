@@ -107,12 +107,23 @@ def _feature_coverage(df):
 
 def _confidence_fields(df, newest_timestamp, live):
     coverage = _feature_coverage(df)
+    repaired_count = 0
+    if "observation_gap_filled" in df:
+        repaired_count = int(
+            pd.to_numeric(df["observation_gap_filled"], errors="coerce")
+            .fillna(0)
+            .sum()
+        )
     age_seconds = None
     age_factor = 1.0
     if live:
         age_seconds = float((pd.Timestamp.now(tz="UTC") - newest_timestamp).total_seconds())
         age_factor = max(0.0, min(1.0, 1.0 - max(age_seconds, 0.0) / MAX_OBSERVATION_AGE_SECONDS))
-    confidence = float(max(0.0, min(1.0, coverage * age_factor)))
+    # A repaired short gap is safe enough for continuity, but it is still
+    # synthetic context. Apply a small, bounded penalty rather than hiding
+    # that uncertainty from the dashboard/alert policy.
+    gap_factor = max(0.75, 1.0 - repaired_count / 120.0)
+    confidence = float(max(0.0, min(1.0, coverage * age_factor * gap_factor)))
     if confidence >= 0.85:
         level = "high"
     elif confidence >= 0.55:
@@ -120,13 +131,17 @@ def _confidence_fields(df, newest_timestamp, live):
     else:
         level = "low"
     reason = "continuous sensor context"
-    if coverage < 1.0:
+    if repaired_count:
+        reason = "short sensor gap repaired"
+    elif coverage < 1.0:
         reason = "short or interrupted sensor context"
     elif live and age_factor < 1.0:
         reason = "latest sensor observation is aging"
     return {
         "data_age_seconds": age_seconds,
         "feature_coverage": coverage,
+        "short_gap_repaired": bool(repaired_count),
+        "short_gap_repaired_count": repaired_count,
         "data_confidence": confidence,
         "confidence_level": level,
         "confidence_reason": reason,
