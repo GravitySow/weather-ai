@@ -491,9 +491,12 @@ def poll_loop(callback: Callable[[dict[str, Any]], Any]) -> None:
         elif result.get("status") == "duplicate":
             backoff_seconds = interval
         else:
-            # A transient timeout/429/5xx should not hammer the Core API. The
-            # next successful read resets the cadence to the configured poll.
-            backoff_seconds = min(300, max(interval, backoff_seconds * 2))
+            # Keep the source cadence after a transient failure.  Exponential
+            # backoff here creates avoidable 2–5 minute holes in the sensor
+            # history, which can invalidate the model's continuous feature
+            # window.  HA Core is local and each request already has a bounded
+            # timeout, so retrying on the next configured poll is preferable.
+            backoff_seconds = interval
         # Sleep only for the remainder of the interval. The callback is
         # normally a non-blocking queue put, but this also keeps cadence stable
         # if a caller supplies a synchronous callback in another deployment.
