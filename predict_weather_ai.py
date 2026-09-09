@@ -107,10 +107,18 @@ def _feature_coverage(df):
 
 def _confidence_fields(df, newest_timestamp, live):
     coverage = _feature_coverage(df)
+    confidence_frame = df
+    if not df.empty and "segment_id" in df:
+        latest_segment = df["segment_id"].iloc[-1]
+        confidence_frame = df.loc[df["segment_id"] == latest_segment]
+    # Only the latest model context affects this forecast. Older repaired rows
+    # from the retained CSV history must not make a current forecast look
+    # low-confidence.
+    confidence_frame = confidence_frame.tail(120)
     repaired_count = 0
-    if "observation_gap_filled" in df:
+    if "observation_gap_filled" in confidence_frame:
         repaired_count = int(
-            pd.to_numeric(df["observation_gap_filled"], errors="coerce")
+            pd.to_numeric(confidence_frame["observation_gap_filled"], errors="coerce")
             .fillna(0)
             .sum()
         )
