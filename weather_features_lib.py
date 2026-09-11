@@ -16,6 +16,11 @@ DEFAULT_LATITUDE = 13.8692387
 DEFAULT_LONGITUDE = 100.5180519
 SHORT_GAP_MIN_SECONDS = 90.0
 SHORT_GAP_MAX_SECONDS = 330.0
+# A second API delivery can arrive as a short burst after a delayed poll.  A
+# 25-second burst is still close enough to the normal one-minute cadence to
+# keep the same feature segment; only very short intervals (likely a true
+# duplicate/out-of-order sample) restart the row-based history.
+MIN_VALID_INTERVAL_SECONDS = 20.0
 NOMINAL_SAMPLE_SECONDS = 60.0
 
 
@@ -479,7 +484,7 @@ def build_feature_frame(df):
     # Duplicates, clock reversals, and longer gaps still restart the segment.
     df = _repair_short_gaps(df)
     time_gap = df["timestamp"].diff()
-    irregular = time_gap.lt(pd.Timedelta(seconds=30)) | time_gap.gt(
+    irregular = time_gap.lt(pd.Timedelta(seconds=MIN_VALID_INTERVAL_SECONDS)) | time_gap.gt(
         pd.Timedelta(seconds=SHORT_GAP_MAX_SECONDS)
     )
     df["segment_id"] = irregular.cumsum()
