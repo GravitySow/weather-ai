@@ -15,7 +15,7 @@ import pandas as pd
 DEFAULT_LATITUDE = 13.8692387
 DEFAULT_LONGITUDE = 100.5180519
 SHORT_GAP_MIN_SECONDS = 90.0
-SHORT_GAP_MAX_SECONDS = 330.0
+SHORT_GAP_MAX_SECONDS = 630.0
 # A second API delivery can arrive as a short burst after a delayed poll.  A
 # 25-second burst is still close enough to the normal one-minute cadence to
 # keep the same feature segment; only very short intervals (likely a true
@@ -31,7 +31,8 @@ def _repair_short_gaps(df):
     timestamp jump would otherwise make every later lag too old and force a
     full 120-minute warm-up. Gaps up to five minutes (with a small timestamp
     jitter allowance) are repaired with one interpolated row per missing
-    minute. Longer gaps still become a new segment and are never filled.
+    minute. Gaps up to ten minutes (plus a small timestamp jitter allowance)
+    are filled; longer gaps still become a new segment and are never filled.
     """
     frame = df.reset_index(drop=True).copy()
     frame["observation_gap_filled"] = 0.0
@@ -61,7 +62,7 @@ def _repair_short_gaps(df):
 
         # Round to the expected one-minute cadence, then insert every missing
         # slot rather than a single midpoint. This preserves row-based lags
-        # for a gap of two to five minutes.
+        # for a gap of two to ten minutes.
         missing_count = max(1, int(round(gap_seconds / NOMINAL_SAMPLE_SECONDS)) - 1)
         repaired_any = True
         for slot in range(1, missing_count + 1):

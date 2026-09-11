@@ -29,6 +29,11 @@ TEMP_FORECAST_WINDOWS = [30]
 MODEL_KIND = "rf"  # Options: "xgb", "rf", "extra_trees"
 DATA_DIR = os.getenv("WEATHER_DATA_DIR", "dataset")
 MAX_OBSERVATION_AGE_SECONDS = 180
+# A short API outage can be bridged with a last-value forecast so dashboards
+# and alerts do not disappear while the sender reconnects.  The synthetic
+# tail is deliberately bounded to ten minutes; older data must remain stale.
+MAX_SIMULATED_TAIL_AGE_SECONDS = 600
+SIMULATED_TAIL_STEP_SECONDS = 60
 
 # Below this magnitude (hPa over the last hour) the pressure is called "steady"
 # rather than rising/falling — arbitrary but keeps the arrow from flickering
@@ -116,9 +121,16 @@ def _confidence_fields(df, newest_timestamp, live):
     # low-confidence.
     confidence_frame = confidence_frame.tail(120)
     repaired_count = 0
+    simulated_tail_count = 0
     if "observation_gap_filled" in confidence_frame:
         repaired_count = int(
             pd.to_numeric(confidence_frame["observation_gap_filled"], errors="coerce")
+            .fillna(0)
+            .sum()
+        )
+    if "simulation_tail_filled" in confidence_frame:
+        simulated_tail_count = int(
+            pd.to_numeric(confidence_frame["simulation_tail_filled"], errors="coerce")
             .fillna(0)
             .sum()
         )
@@ -139,7 +151,9 @@ def _confidence_fields(df, newest_timestamp, live):
     else:
         level = "low"
     reason = "continuous sensor context"
-    if repaired_count:
+    if simulated_tail_count:
+        reason = "latest sensor outage temporarily simulated"
+    elif repaired_count:
         reason = "short sensor gap repaired"
     elif coverage < 1.0:
         reason = "short or interrupted sensor context"
@@ -150,6 +164,7 @@ def _confidence_fields(df, newest_timestamp, live):
         "feature_coverage": coverage,
         "short_gap_repaired": bool(repaired_count),
         "short_gap_repaired_count": repaired_count,
+        "simulated_tail_count": simulated_tail_count,
         "data_confidence": confidence,
         "confidence_level": level,
         "confidence_reason": reason,
@@ -243,6 +258,58 @@ def load_recent_from_db(lookback_minutes=130):
     except Exception:
         logger.exception("Could not load recent readings from DB; continuing with CSV only")
         return _empty_history_frame()
+
+
+def _simulate_recent_tail(df, now=None):
+    """Temporarily bridge a live API outage of at most ten minutes.
+
+    The real history remains unchanged.  We append one-minute last-value rows
+    only for live inference, mark them explicitly, and stop before the newest
+    synthetic row would be more than a small jitter away from ``now``.  This
+    keeps row-based lags usable while retaining a hard stale-data boundary.
+    """
+    if df is None or df.empty:
+        return df, 0
+
+    frame = df.copy()
+    frame["timestamp"] = pd.to_datetime(
+        frame["timestamp"], errors="coerce", utc=True, format="mixed"
+    )
+    frame = frame.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    if frame.empty:
+        return frame, 0
+
+    now_timestamp = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    if now_timestamp.tzinfo is None:
+        now_timestamp = now_timestamp.tz_localize("UTC")
+    else:
+        now_timestamp = now_timestamp.tz_convert("UTC")
+    newest = frame["timestamp"].iloc[-1]
+    age_seconds = (now_timestamp - newest).total_seconds()
+    if age_seconds <= MAX_OBSERVATION_AGE_SECONDS or age_seconds > MAX_SIMULATED_TAIL_AGE_SECONDS:
+        return frame, 0
+
+    if "observation_gap_filled" not in frame:
+        frame["observation_gap_filled"] = 0.0
+    if "simulation_tail_filled" not in frame:
+        frame["simulation_tail_filled"] = 0.0
+
+    synthetic = []
+    previous = frame.iloc[-1].copy()
+    next_timestamp = newest + pd.Timedelta(seconds=SIMULATED_TAIL_STEP_SECONDS)
+    # Leave at most 20 seconds of normal timestamp jitter at the live tail.
+    cutoff = now_timestamp - pd.Timedelta(seconds=20)
+    while next_timestamp <= cutoff:
+        row = previous.copy()
+        row["timestamp"] = next_timestamp
+        row["observation_gap_filled"] = 1.0
+        row["simulation_tail_filled"] = 1.0
+        synthetic.append(row)
+        next_timestamp += pd.Timedelta(seconds=SIMULATED_TAIL_STEP_SECONDS)
+
+    if not synthetic:
+        return frame, 0
+    return pd.concat([frame, pd.DataFrame(synthetic)], ignore_index=True), len(synthetic)
 
 
 def _attach_nwp_features(db_df):
@@ -350,9 +417,12 @@ def predict(path=None, model_kind=MODEL_KIND, model_dir=None):
 
     if path is None:
         newest = df["timestamp"].iloc[-1]
-        age_seconds = (pd.Timestamp.now(tz="UTC") - newest).total_seconds()
-        if age_seconds > MAX_OBSERVATION_AGE_SECONDS or age_seconds < -60:
+        now_timestamp = pd.Timestamp.now(tz="UTC")
+        age_seconds = (now_timestamp - newest).total_seconds()
+        if age_seconds > MAX_SIMULATED_TAIL_AGE_SECONDS or age_seconds < -60:
             raise ValueError(f"Latest observation is not current ({newest}); cannot issue a live forecast")
+        if age_seconds > MAX_OBSERVATION_AGE_SECONDS:
+            df, _ = _simulate_recent_tail(df, now=now_timestamp)
 
     df, _group, built_features = build_feature_frame(df)
 
