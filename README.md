@@ -102,6 +102,10 @@ stop, a real return sends the distinct **rain resumed** event, so it is not supp
 the previous rain-start cooldown. Rain-start and model-alert messages include the
 multi-horizon probabilities, pressure trend, model version, feature-history coverage,
 sensor-data age, and clearly labelled experimental radar/cloud context when available.
+The default `rf_onset` model predicts a new rain onset after a dry antecedent. Its
+notification path requires `rain_alert_min_horizon_signals` horizons (default 2) and
+three consecutive polls before sending a message. Set that option to `1` only for
+diagnostic comparison, not as the recommended alert policy.
 Use `/status` in Telegram for the same source/model health on demand; `/forecast`
 includes the quality metadata alongside the nowcast. NWP bias correction is opt-in: set
 `nwp_bias_correction_path` to a reviewed JSON artifact; the API keeps both raw

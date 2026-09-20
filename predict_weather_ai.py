@@ -26,7 +26,8 @@ PREDICTION_WINDOWS = [5, 10, 30, 60, 120]
 # models were dropped: min_samples_leaf=2 trees ballooned to ~600MB each in
 # RAM for zero accuracy gain over persistence).
 TEMP_FORECAST_WINDOWS = [30]
-MODEL_KIND = "rf"  # Options: "xgb", "rf", "extra_trees"
+ONSET_MODEL_KINDS = {"rf_onset", "extra_trees_onset"}
+MODEL_KIND = os.getenv("WEATHER_MODEL_KIND", "rf")  # Options: "xgb", "rf", "rf_onset", "extra_trees", "extra_trees_onset"
 DATA_DIR = os.getenv("WEATHER_DATA_DIR", "dataset")
 MAX_OBSERVATION_AGE_SECONDS = 180
 # A short API outage can be bridged with a last-value forecast so dashboards
@@ -95,6 +96,9 @@ def _load_bundle_metadata(model_dir):
         "feature_sha256": metadata.get("feature_sha256"),
         "status": metadata.get("status", "legacy" if not manifest_path.exists() else "candidate"),
         "required_runtime_horizons": metadata.get("required_runtime_horizons"),
+        "feature_profile": metadata.get("feature_profile"),
+        "target_kind": metadata.get("target_kind"),
+        "eligibility": metadata.get("eligibility"),
     }
     _MODEL_METADATA_CACHE[key] = metadata
     return metadata
@@ -384,7 +388,17 @@ def predict(path=None, model_kind=MODEL_KIND, model_dir=None):
         return os.path.join(model_dir, name) if model_dir else name
 
     trained_features = _cached_joblib_load(model_path("weather_features.joblib"))
-    thresholds = _cached_joblib_load(model_path("weather_thresholds.joblib"))
+    threshold_file = "weather_onset_thresholds.joblib" if model_kind in ONSET_MODEL_KINDS else "weather_thresholds.joblib"
+    thresholds = _cached_joblib_load(model_path(threshold_file))
+    if model_kind in ONSET_MODEL_KINDS:
+        rain_derived = [name for name in trained_features
+                        if name in {"rain_flag", "rain_sensor", "rain_now"}
+                        or name.startswith("rain_")]
+        if rain_derived:
+            raise ValueError(
+                "Onset bundle contains rain-derived input features; refusing to use a "
+                f"leaky candidate: {rain_derived[:5]}"
+            )
     # Rain bundles may evolve with new trend features while the optional
     # temperature regressor remains on its older, smaller feature schema.
     # Keep the two manifests independent so promoting a rain candidate cannot
@@ -450,6 +464,13 @@ def predict(path=None, model_kind=MODEL_KIND, model_dir=None):
     timestamp = latest["timestamp"].iloc[0]
     rain_now_value = float(latest["rain_flag"].iloc[0])
     is_raining_now = rain_now_value > RAIN_THRESHOLD
+    # Legacy/replay feature stubs may not expose the derived 60-minute rain
+    # history.  Fall back to the current sensor value for regular RF bundles;
+    # full production feature frames always include rain_last_60m.
+    rain_last_60m_series = latest["rain_last_60m"] if "rain_last_60m" in latest else latest["rain_flag"]
+    rain_last_60m_value = float(rain_last_60m_series.iloc[0])
+    dry_60m = rain_last_60m_value <= RAIN_THRESHOLD
+    onset_eligible = bool(not is_raining_now and dry_60m)
 
     temp_now = float(latest["temp"].iloc[0])
     humidity_now = float(latest["humidity"].iloc[0])
@@ -467,6 +488,9 @@ def predict(path=None, model_kind=MODEL_KIND, model_dir=None):
         "bundle_created_at_utc": bundle_metadata["created_at_utc"],
         "feature_count": len(trained_features),
         "feature_sha256": bundle_metadata.get("feature_sha256"),
+        "feature_profile": bundle_metadata.get("feature_profile"),
+        "target_kind": bundle_metadata.get("target_kind"),
+        "eligibility": bundle_metadata.get("eligibility"),
         "model_status": bundle_metadata.get("status"),
         "required_runtime_horizons": bundle_metadata["required_runtime_horizons"]
         or PREDICTION_WINDOWS,
@@ -480,6 +504,9 @@ def predict(path=None, model_kind=MODEL_KIND, model_dir=None):
         "trend_arrow": trend_arrow_label(pressure_trend_1h),
         "rain_now": rain_now_value,
         "is_raining_now": bool(is_raining_now),
+        "rain_last_60m": rain_last_60m_value,
+        "dry_60m": dry_60m,
+        "onset_eligible": onset_eligible if model_kind in ONSET_MODEL_KINDS else None,
         "predictions": {},
         "temp_forecast": {},
     }
@@ -506,7 +533,10 @@ def predict(path=None, model_kind=MODEL_KIND, model_dir=None):
         threshold = load_threshold(thresholds, model_kind, horizon)
         proba = probabilities[f"{horizon}m"]
         will_rain = int(proba >= threshold)
-        advance_alert = bool(will_rain and not is_raining_now)
+        if model_kind in ONSET_MODEL_KINDS:
+            advance_alert = bool(will_rain and onset_eligible)
+        else:
+            advance_alert = bool(will_rain and not is_raining_now)
 
         result["predictions"][f"{horizon}m"] = {
             "rain_alert": advance_alert,
@@ -514,6 +544,9 @@ def predict(path=None, model_kind=MODEL_KIND, model_dir=None):
             "probability": float(proba),
             "threshold": float(threshold),
             "suppressed_by_rain_now": bool(will_rain and is_raining_now),
+            "suppressed_by_rain_antecedent": bool(
+                will_rain and model_kind in ONSET_MODEL_KINDS and not onset_eligible
+            ),
         }
         if postprocessing != "none":
             result["predictions"][f"{horizon}m"]["unadjusted_probability"] = raw_probabilities[f"{horizon}m"]
@@ -613,6 +646,7 @@ def print_human_result(result):
         print(f"{horizon}: {status}")
         print(f"model_rain_signal: {prediction['model_rain_signal']}")
         print(f"suppressed_by_rain_now: {prediction['suppressed_by_rain_now']}")
+        print(f"suppressed_by_rain_antecedent: {prediction.get('suppressed_by_rain_antecedent', False)}")
         print(f"probability: {prediction['probability']:.3f}")
         print(f"threshold: {prediction['threshold']:.2f}")
 
@@ -624,7 +658,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         default=MODEL_KIND,
-        choices=["xgb", "rf", "extra_trees"],
+        choices=["xgb", "rf", "rf_onset", "extra_trees", "extra_trees_onset"],
         help="Model kind to use.",
     )
     parser.add_argument("--json", action="store_true", help="Print one-line JSON for Node-RED.")

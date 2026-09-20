@@ -56,7 +56,7 @@ RAIN_THRESHOLD = 0.10
 # any point in the next lead-minute window.  All other layers retain the
 # historic point-in-time semantics; in particular radar_advection's ETA is a
 # claim about rain at its projected arrival time, not about a whole interval.
-_WINDOW_EVENT_SOURCE_LAYERS = frozenset({"local_rf", "local_xgb"})
+_WINDOW_EVENT_SOURCE_LAYERS = frozenset({"local_rf", "local_rf_onset", "local_xgb"})
 
 # Hourly probabilities for the same *next-N-minute* event as the local
 # classifiers.  They were derived only from each horizon's chronological TRAIN

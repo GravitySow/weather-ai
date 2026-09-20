@@ -1,13 +1,20 @@
 {
   "schema_version": 1,
-  "status": "promoted",
-  "model_kind": "rf",
-  "model_version": "rf-trend-20260908",
-  "created_at_utc": "2026-09-07T17:44:12.934049+00:00",
-  "feature_count": 165,
-  "feature_sha256": "18a747819bbaa14b82df15c2c89c6e832b4b923d41be536adde0225d4dce17e0",
-  "required_runtime_horizons": [5, 10, 30],
+  "status": "candidate",
+  "model_kind": "rf_onset",
+  "feature_profile": "onset_no_rain_history",
+  "target_kind": "rain_onset",
+  "eligibility": "not_raining_now_and_dry_60m",
+  "model_version": "rf-onset-norain-balanced-20260921",
+  "created_at_utc": "2026-09-20T17:50:34.756803+00:00",
+  "feature_count": 190,
+  "feature_sha256": "6b6f7da7d81ed3fcc549f6b490a640838b5972e6f7857c9a88ed4a157ed68126",
+  "required_runtime_horizons": [
+    5,
+    10,
+    30
+  ],
   "evaluation_file": "evaluation.json",
-  "threshold_file": "weather_thresholds.joblib",
-  "promoted_from": "artifacts/rf-trend-20260908"
+  "threshold_file": "weather_onset_thresholds.joblib",
+  "data_dir": "E:\\Weather model\\dataset"
 }

@@ -36,18 +36,27 @@ def tune_thresholds(
     max_false_episode_ratio: float = 0.20,
     cooldown_minutes: float = 30.0,
     alarm_scope: str = "dry_60m",
+    max_false_episodes: int | None = None,
+    confirm_streak: int = 3,
 ):
     bundle = Path(bundle_dir)
     evaluation = json.loads((bundle / "evaluation.json").read_text(encoding="utf-8"))
     kind = evaluation["model_kind"]
+    target_kind = evaluation.get("target_kind", "rain_onset" if kind in {"rf_onset", "extra_trees_onset"} else "rain_window")
     history, _, _ = load_features(data_dir)
     if not 0 <= max_false_episode_ratio <= 1:
         raise ValueError("max_false_episode_ratio must be between zero and one")
+    if max_false_episodes is not None and max_false_episodes < 0:
+        raise ValueError("max_false_episodes must be non-negative")
+    if confirm_streak < 1 or int(confirm_streak) != confirm_streak:
+        raise ValueError("confirm_streak must be a positive integer")
 
     output = {"schema_version": 1, "created_at_utc": datetime.now(timezone.utc).isoformat(),
               "source_bundle": str(bundle.resolve()), "model_kind": kind,
               "alarm_scope": alarm_scope, "cooldown_minutes": cooldown_minutes,
-              "max_false_episode_ratio": max_false_episode_ratio, "horizons": []}
+              "max_false_episode_ratio": max_false_episode_ratio,
+              "max_false_episodes": max_false_episodes,
+              "confirm_streak": int(confirm_streak), "horizons": []}
     tables = {}
     for result in evaluation["results"]:
         horizon = int(result["horizon"])
@@ -62,17 +71,19 @@ def tune_thresholds(
                 history, predictions, horizon, threshold,
                 dry_minutes=60, cooldown_minutes=cooldown_minutes,
                 alarm_scope=alarm_scope,
+                target_kind=target_kind,
+                confirm_streak=confirm_streak,
             )
             rows.append(summary)
         table = pd.DataFrame(rows)
-        # Zero complete episodes is valid (no alerts or only boundary-censored
-        # alerts); it must not force a threshold of 1.0 when the observed
-        # episode count is also zero.  The hard safety signal is the absolute
-        # number of false complete episodes plus the ratio when a denominator
-        # exists.
+        # Use the configured ratio as the primary budget.  Older code also
+        # required false_alert_episodes == 0, which silently selected 1.0 on
+        # sparse validation windows and turned the policy into no-alert.  An
+        # absolute cap is still available when an operator explicitly needs it.
         table["safe"] = (
-            table["false_alert_episodes"].eq(0)
-            & table["false_alarm_ratio"].fillna(0).le(max_false_episode_ratio)
+            table["false_alarm_ratio"].fillna(0).le(max_false_episode_ratio)
+            & (max_false_episodes is None
+               or table["false_alert_episodes"].le(max_false_episodes))
             # A threshold whose alerts occupy the entire validation boundary
             # is censored, not evidence of zero false alarms.  Accept either
             # no alerts or at least one complete episode to avoid this trap.
@@ -112,14 +123,17 @@ def main(argv=None):
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--output-dir", required=True, help="New directory; refuses to overwrite")
     parser.add_argument("--max-false-episode-ratio", type=float, default=0.20)
+    parser.add_argument("--max-false-episodes", type=int, default=None)
     parser.add_argument("--cooldown-minutes", type=float, default=30.0)
     parser.add_argument("--alarm-scope", choices=["dry_now", "dry_60m"], default="dry_60m")
+    parser.add_argument("--confirm-streak", type=int, default=3)
     args = parser.parse_args(argv)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=False)
     manifest, tables = tune_thresholds(
         args.bundle_dir, args.data_dir, args.max_false_episode_ratio,
-        args.cooldown_minutes, args.alarm_scope,
+        args.cooldown_minutes, args.alarm_scope, args.max_false_episodes,
+        args.confirm_streak,
     )
     (output_dir / "event_thresholds.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False, allow_nan=False), encoding="utf-8"

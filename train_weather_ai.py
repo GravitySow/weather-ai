@@ -28,8 +28,36 @@ from rain_probability import enforce_horizon_coherence
 from weather_probability_model import PersistenceBlendClassifier, select_persistence_weight
 
 RAIN_THRESHOLD = 0.10
+ONSET_DRY_MINUTES = 60
 PREDICTION_WINDOWS = [5, 10, 30, 60, 120]
 RANDOM_STATE = 42
+
+
+def is_onset_model(kind):
+    """Return whether ``kind`` predicts a new dry-to-wet onset.
+
+    Onset models intentionally use a different target and feature profile from
+    the legacy ``any rain in the next N minutes`` models.  Keeping this in one
+    predicate prevents a new candidate kind from accidentally falling back to
+    the rain-contaminated training path.
+    """
+    return kind in {"rf_onset", "extra_trees_onset"}
+
+
+def select_model_features(features, model_kind):
+    """Select the causal feature allow-list for a model family.
+
+    The onset classifier must answer *before* rain is detected.  Any feature
+    derived from the rain sensor is therefore excluded from its input matrix;
+    rain observations remain available outside the matrix for labels, gates,
+    and post-run diagnostics.
+    """
+    names = list(features)
+    if not is_onset_model(model_kind):
+        return names
+    excluded = {"rain_flag", "rain_sensor", "rain_now"}
+    return [name for name in names
+            if name not in excluded and not name.startswith("rain_")]
 
 
 def load_features(data_dir="dataset"):
@@ -78,6 +106,66 @@ def build_future_rain_target(group, window):
     )
     elapsed = group["timestamp"].shift(-window) - group.obj["timestamp"]
     valid = (elapsed - pd.Timedelta(minutes=window)).abs() <= pd.Timedelta(seconds=30)
+    # A repaired row is useful to keep live row-based features warm, but it is
+    # not an observation that can be used as ground truth.  Do not let a
+    # future bridge row manufacture a label during offline training.
+    if "observation_gap_filled" in group.obj:
+        filled = pd.to_numeric(group.obj["observation_gap_filled"], errors="coerce").fillna(0)
+        future_filled = filled.groupby(group.obj["segment_id"], group_keys=False).transform(
+            lambda s: s.shift(-1).rolling(window, min_periods=window).max().shift(-(window - 1))
+        )
+        valid &= future_filled.fillna(0).le(0)
+    return future.where(valid)
+
+
+def build_future_onset_target(group, window, dry_minutes=ONSET_DRY_MINUTES):
+    """Whether a *new* rain onset occurs in the next ``window`` samples.
+
+    Unlike :func:`build_future_rain_target`, continuation of an already wet
+    episode is not a positive label.  An onset is the first wet sample after
+    ``dry_minutes`` consecutive dry samples in the same uninterrupted segment,
+    with the same 30-second cadence guard used by the event evaluator.
+    """
+    if dry_minutes < 1 or int(dry_minutes) != dry_minutes:
+        raise ValueError("dry_minutes must be a positive integer")
+    dry_minutes = int(dry_minutes)
+    rain = group.obj["rain_flag"]
+    filled = pd.to_numeric(
+        group.obj.get("observation_gap_filled", pd.Series(0.0, index=group.obj.index)),
+        errors="coerce",
+    ).fillna(0)
+    grouped_rain = rain.groupby(group.obj["segment_id"], group_keys=False)
+    prior_max = grouped_rain.transform(
+        lambda s: s.shift(1).rolling(dry_minutes, min_periods=dry_minutes).max()
+    )
+    timestamps = group.obj["timestamp"]
+    grouped_timestamps = timestamps.groupby(group.obj["segment_id"], group_keys=False)
+    elapsed_dry = grouped_timestamps.transform(
+        lambda s: s - s.shift(dry_minutes)
+    )
+    grouped_filled = filled.groupby(group.obj["segment_id"], group_keys=False)
+    prior_filled = grouped_filled.transform(
+        lambda s: s.shift(1).rolling(dry_minutes, min_periods=dry_minutes).max()
+    )
+    onset = (
+        (rain > RAIN_THRESHOLD)
+        & filled.eq(0)
+        & (prior_max <= RAIN_THRESHOLD)
+        & prior_filled.fillna(0).le(0)
+        & ((elapsed_dry - pd.Timedelta(minutes=dry_minutes)).abs()
+           <= pd.Timedelta(seconds=30))
+    ).fillna(False).astype(float)
+    onset_group = onset.groupby(group.obj["segment_id"], group_keys=False)
+    future = onset_group.transform(
+        lambda s: s.shift(-1).rolling(window, min_periods=window).max()
+        .shift(-(window - 1))
+    )
+    elapsed = grouped_timestamps.shift(-window) - group.obj["timestamp"]
+    valid = (elapsed - pd.Timedelta(minutes=window)).abs() <= pd.Timedelta(seconds=30)
+    future_filled = grouped_filled.transform(
+        lambda s: s.shift(-1).rolling(window, min_periods=window).max().shift(-(window - 1))
+    )
+    valid &= future_filled.fillna(0).le(0)
     return future.where(valid)
 
 
@@ -124,6 +212,37 @@ def select_threshold(y_true, proba):
     return float(best["threshold"]), sweep
 
 
+def build_onset_sample_weights(part):
+    """Equalise positive contribution across onset episodes.
+
+    A long storm can otherwise contribute dozens of nearly identical positive
+    rows while a short shower contributes only a few.  Keep the total positive
+    mass unchanged, spread it evenly over contiguous labelled episodes, and
+    slightly up-weight dry hard negatives (humid/light-drop conditions with no
+    observed onset).  This affects fitting only; calibration still sees the
+    natural event frequency.
+    """
+    target = pd.to_numeric(part["target"], errors="coerce").fillna(0).to_numpy() > 0.5
+    weights = np.ones(len(part), dtype=float)
+    positive_count = int(target.sum())
+    if positive_count:
+        starts = target & ~np.concatenate(([False], target[:-1]))
+        event_ids = np.cumsum(starts)
+        event_ids[~target] = 0
+        event_count = int(starts.sum())
+        for event_id in range(1, event_count + 1):
+            members = event_ids == event_id
+            weights[members] = positive_count / (event_count * members.sum())
+
+    hard_negative = ~target
+    if "humidity" in part:
+        hard_negative &= pd.to_numeric(part["humidity"], errors="coerce").fillna(0).to_numpy() >= 85.0
+    if "light_slope_30m" in part:
+        hard_negative &= pd.to_numeric(part["light_slope_30m"], errors="coerce").fillna(0).to_numpy() < 0.0
+    weights[hard_negative] *= 1.5
+    return weights
+
+
 def probability_metrics(y, p, threshold):
     if len(y) == 0:
         return {"n": 0}
@@ -148,7 +267,7 @@ def make_classifier(kind, trees=600, jobs=4):
         return RandomForestClassifier(n_estimators=trees, max_depth=18, min_samples_leaf=2,
                                       max_features="sqrt", random_state=RANDOM_STATE,
                                       n_jobs=jobs, class_weight="balanced_subsample")
-    if kind == "extra_trees":
+    if kind in ("extra_trees", "extra_trees_onset"):
         # Extremely randomized trees provide a diverse, CPU-friendly candidate
         # without changing the deployed RF bundle.  Keep the same feature
         # schema and calibration/evaluation path so the comparison is fair.
@@ -166,7 +285,8 @@ def make_classifier(kind, trees=600, jobs=4):
 
 def train_horizon(df, group, features, horizon, kind, output_dir, trees=600, jobs=4,
                   common_index=None, blend_persistence=False):
-    future = build_future_rain_target(group, horizon)
+    target_builder = build_future_onset_target if is_onset_model(kind) else build_future_rain_target
+    future = target_builder(group, horizon)
     frame = df.copy()
     frame["target"] = (future > RAIN_THRESHOLD).astype(float).where(future.notna())
     frame = frame.dropna(subset=[*features, "target"]).copy()
@@ -174,7 +294,7 @@ def train_horizon(df, group, features, horizon, kind, output_dir, trees=600, job
         frame = frame.loc[common_index]
     # Use common time boundaries even for onset, so its evaluation is comparable.
     parts = chronological_partitions(frame, horizon)
-    if kind == "rf_onset":
+    if is_onset_model(kind):
         parts = {name: part.loc[(part.rain_now <= RAIN_THRESHOLD) &
                                (part.rain_last_60m <= RAIN_THRESHOLD)] for name, part in parts.items()}
     for name, part in parts.items():
@@ -185,7 +305,10 @@ def train_horizon(df, group, features, horizon, kind, output_dir, trees=600, job
     model = make_classifier(kind, trees, jobs)
     if kind == "xgb":
         model.set_params(scale_pos_weight=float((train.target == 0).sum() / (train.target == 1).sum()))
-    model.fit(train[features], train.target.astype(int))
+    fit_kwargs = {}
+    if is_onset_model(kind):
+        fit_kwargs["sample_weight"] = build_onset_sample_weights(train)
+    model.fit(train[features], train.target.astype(int), **fit_kwargs)
     calibrated = CalibratedClassifierCV(FrozenEstimator(model), method="sigmoid")
     calibrated.fit(calibration[features], calibration.target.astype(int))
     # Decide using validation only. The last 20% is not inspected until this is fixed.
@@ -199,7 +322,7 @@ def train_horizon(df, group, features, horizon, kind, output_dir, trees=600, job
     base_selected = selected
     validation_brier_before_blend = float(brier_score_loss(validation.target, val_p))
     model_weight = 1.0
-    if blend_persistence:
+    if blend_persistence and not is_onset_model(kind):
         persistence_val = (validation.rain_now > RAIN_THRESHOLD).astype(float).to_numpy()
         model_weight = select_persistence_weight(validation.target, val_p, persistence_val)
         if model_weight < 1:
@@ -318,7 +441,7 @@ def compare_existing_bundle(bundle_dir, reference_dir, start, data_dir="dataset"
     kind = report["model_kind"]
     frame, _, _ = load_features(data_dir)
     reference_features = joblib.load(Path(reference_dir) / "weather_features.joblib")
-    thresholds_name = "weather_onset_thresholds.joblib" if kind == "rf_onset" else "weather_thresholds.joblib"
+    thresholds_name = "weather_onset_thresholds.joblib" if is_onset_model(kind) else "weather_thresholds.joblib"
     reference_thresholds = joblib.load(Path(reference_dir) / thresholds_name)
     reference_postprocessing = reference_thresholds.get("probability_postprocessing", "none")
     if reference_postprocessing not in ("none", "isotonic_horizons"):
@@ -359,7 +482,7 @@ def main(argv=None, default_kind="rf"):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", default="dataset")
     parser.add_argument("--output-dir", default=None, help="New directory; refuses to overwrite existing artifacts")
-    parser.add_argument("--model", choices=["rf", "xgb", "rf_onset", "extra_trees"], default=default_kind)
+    parser.add_argument("--model", choices=["rf", "xgb", "rf_onset", "extra_trees", "extra_trees_onset"], default=default_kind)
     parser.add_argument("--horizons", nargs="+", type=int, choices=PREDICTION_WINDOWS, default=PREDICTION_WINDOWS)
     parser.add_argument("--trees", type=int, default=600)
     parser.add_argument("--jobs", type=int, default=4)
@@ -372,15 +495,27 @@ def main(argv=None, default_kind="rf"):
         parser.error("--trees must be positive and --jobs must be nonzero")
     output_dir = Path(args.output_dir or f"artifacts/{args.model}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}")
     output_dir.mkdir(parents=True, exist_ok=False)
-    df, group, features = load_features(args.data_dir)
+    df, group, all_features = load_features(args.data_dir)
+    features = select_model_features(all_features, args.model)
+    if not features:
+        parser.error(f"No usable features remain for model kind {args.model}")
     horizons = sorted(set(args.horizons))
     valid_rows = df[features].notna().all(axis=1)
+    # Synthetic bridge rows keep runtime features alive, but cannot be used as
+    # independent training examples or as a future label source.
+    if "observation_gap_filled" in df:
+        valid_rows &= pd.to_numeric(df["observation_gap_filled"], errors="coerce").fillna(0).le(0)
+    target_builder = build_future_onset_target if is_onset_model(args.model) else build_future_rain_target
+    target_valid_counts = {}
     for horizon in horizons:
-        valid_rows &= build_future_rain_target(group, horizon).notna()
+        target_valid = target_builder(group, horizon).notna()
+        target_valid_counts[str(horizon)] = int(target_valid.sum())
+        valid_rows &= target_valid
     common_index = df.index[valid_rows]
     print(f"Loaded {len(df)} rows, {len(features)} features, {df.timestamp.min()} to {df.timestamp.max()}", flush=True)
+    effective_blend = args.blend_persistence and not is_onset_model(args.model)
     results = [train_horizon(df, group, features, h, args.model, output_dir, args.trees, args.jobs,
-                             common_index=common_index, blend_persistence=args.blend_persistence)
+                             common_index=common_index, blend_persistence=effective_blend)
                for h in horizons]
     postprocessing = "isotonic_horizons" if args.coherent_probabilities else "none"
     if args.coherent_probabilities:
@@ -388,7 +523,7 @@ def main(argv=None, default_kind="rf"):
     joblib.dump(features, output_dir / "weather_features.joblib")
     drift_baseline = build_baseline(df, features)
     save_baseline(drift_baseline, output_dir / "drift_baseline.json")
-    threshold_file = "weather_onset_thresholds.joblib" if args.model == "rf_onset" else "weather_thresholds.joblib"
+    threshold_file = "weather_onset_thresholds.joblib" if is_onset_model(args.model) else "weather_thresholds.joblib"
     joblib.dump({"goal": "f1", "selected_on": "chronological_validation",
                  "probability_postprocessing": postprocessing, "horizons": results}, output_dir / threshold_file)
     feature_digest = hashlib.sha256(
@@ -404,9 +539,25 @@ def main(argv=None, default_kind="rf"):
               "model_kind": args.model, "feature_cadence": "60s +/-30s",
               "feature_count": len(features), "feature_names": features,
               "feature_sha256": feature_digest,
-              "target": "any rain >0.10 in next N minutes", "trees": args.trees,
+              "target": ("new rain onset after 60 dry minutes in next N minutes"
+                         if is_onset_model(args.model) else "any rain >0.10 in next N minutes"),
+              "target_kind": "rain_onset" if is_onset_model(args.model) else "rain_window",
+              "eligibility": ("not_raining_now_and_dry_60m"
+                              if is_onset_model(args.model) else "all_observed_rows"),
+              "feature_profile": ("onset_no_rain_history"
+                                  if is_onset_model(args.model) else "all_features"),
+              "data_filtering": {
+                  "rows_loaded": int(len(df)),
+                  "synthetic_rows_excluded": int(
+                      pd.to_numeric(df.get("observation_gap_filled", 0), errors="coerce")
+                      .fillna(0).gt(0).sum()
+                  ),
+                  "common_usable_rows": int(len(common_index)),
+                  "target_valid_rows_by_horizon": target_valid_counts,
+              },
+              "trees": args.trees,
               "split": "60/10/10/20 chronological; horizon + 30s purge",
-              "shared_horizon_splits": True, "blend_persistence": args.blend_persistence,
+              "shared_horizon_splits": True, "blend_persistence": effective_blend,
               "probability_postprocessing": postprocessing,
               "required_runtime_horizons": horizons,
               "drift_baseline_file": "drift_baseline.json",
@@ -420,6 +571,9 @@ def main(argv=None, default_kind="rf"):
         "schema_version": 1,
         "status": "candidate",
         "model_kind": args.model,
+        "feature_profile": report["feature_profile"],
+        "target_kind": report["target_kind"],
+        "eligibility": report["eligibility"],
         "model_version": output_dir.name,
         "created_at_utc": report["created_at_utc"],
         "feature_count": len(features),

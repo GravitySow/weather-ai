@@ -32,7 +32,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from train_weather_ai import RAIN_THRESHOLD, build_future_rain_target, load_features
+from train_weather_ai import (RAIN_THRESHOLD, build_future_onset_target,
+                               build_future_rain_target, load_features)
+from weather_features_lib import MIN_VALID_INTERVAL_SECONDS
 
 
 EVENT_COLUMNS = ["event_id", "onset", "evaluable", "detected", "first_matching_alert",
@@ -43,15 +45,25 @@ EPISODE_COLUMNS = ["episode_id", "first_alert", "last_alert", "alert_rows", "com
 
 
 def _observations(history):
-    frame = history[["timestamp", "rain_flag"]].copy()
+    columns = ["timestamp", "rain_flag"]
+    if "observation_gap_filled" in history:
+        columns.append("observation_gap_filled")
+    frame = history[columns].copy()
     frame["timestamp"] = pd.to_datetime(frame.timestamp, utc=True, format="mixed")
     frame["rain_flag"] = pd.to_numeric(frame.rain_flag, errors="coerce")
+    if "observation_gap_filled" in frame:
+        frame["observation_gap_filled"] = pd.to_numeric(
+            frame.observation_gap_filled, errors="coerce"
+        ).fillna(0.0)
     frame = frame.replace([np.inf, -np.inf], np.nan).dropna().sort_values("timestamp")
     if frame.timestamp.duplicated().any():
         raise ValueError("Observation timestamps must be unique")
     frame = frame.reset_index(drop=True)
     gap = frame.timestamp.diff()
-    frame["segment_id"] = (gap.lt(pd.Timedelta(seconds=30)) |
+    # Keep the same cadence rule as the live feature builder.  Short retry
+    # jitter (20–30s) is still one observation stream; only near-duplicates
+    # below MIN_VALID_INTERVAL_SECONDS or genuine gaps break an event segment.
+    frame["segment_id"] = (gap.lt(pd.Timedelta(seconds=MIN_VALID_INTERVAL_SECONDS)) |
                            gap.gt(pd.Timedelta(seconds=90))).cumsum()
     frame["position"] = np.arange(len(frame))
     return frame
@@ -66,7 +78,8 @@ def _boolean_column(values, name):
 
 
 def evaluate_events(history, predictions, horizon, threshold, dry_minutes=60,
-                    cooldown_minutes=30, alarm_scope="dry_now"):
+                    cooldown_minutes=30, alarm_scope="dry_now", target_kind="rain_window",
+                    confirm_streak=1):
     """Return JSON-safe metrics, an onset table and an alert-episode table.
 
     ``history`` is the frame from ``load_features`` (timestamp/rain_flag are
@@ -83,10 +96,16 @@ def evaluate_events(history, predictions, horizon, threshold, dry_minutes=60,
         raise ValueError("cooldown_minutes must be positive")
     if alarm_scope not in ("dry_now", "dry_60m"):
         raise ValueError("alarm_scope must be dry_now or dry_60m")
+    if target_kind not in ("rain_window", "rain_onset"):
+        raise ValueError("target_kind must be rain_window or rain_onset")
+    if confirm_streak < 1 or int(confirm_streak) != confirm_streak:
+        raise ValueError("confirm_streak must be a positive integer")
     horizon, dry_minutes = int(horizon), int(dry_minutes)
     frame = _observations(history)
     group = frame.groupby("segment_id", group_keys=False)
-    future = build_future_rain_target(group, horizon)
+    future_any = build_future_rain_target(group, horizon)
+    future = (build_future_onset_target(group, horizon, dry_minutes)
+              if target_kind == "rain_onset" else future_any)
     frame["future_observed"] = (future > RAIN_THRESHOLD).where(future.notna())
     frame["future_end"] = group.timestamp.shift(-horizon)
     frame["dry_now_actual"] = frame.rain_flag <= RAIN_THRESHOLD
@@ -95,7 +114,9 @@ def evaluate_events(history, predictions, horizon, threshold, dry_minutes=60,
     before = group.rain_flag.transform(lambda s: s.shift(1).rolling(dry_minutes,
                                                        min_periods=dry_minutes).max())
     elapsed = frame.timestamp - group.timestamp.shift(dry_minutes)
-    starts = frame.loc[(frame.rain_flag > RAIN_THRESHOLD) & (before <= RAIN_THRESHOLD) &
+    starts = frame.loc[(frame.rain_flag > RAIN_THRESHOLD) &
+                       (frame.get("observation_gap_filled", 0) <= 0) &
+                       (before <= RAIN_THRESHOLD) &
                        ((elapsed - pd.Timedelta(minutes=dry_minutes)).abs() <=
                         pd.Timedelta(seconds=30))]
 
@@ -121,7 +142,19 @@ def evaluate_events(history, predictions, horizon, threshold, dry_minutes=60,
     # A missing prediction is an interruption even when sensor history exists.
     usable["block"] = (usable.position.diff().ne(1) |
                        usable.segment_id.diff().ne(0)).cumsum()
-    usable["alert"] = usable[f"{alarm_scope}_actual"] & (usable.probability >= threshold)
+    raw_alert = usable[f"{alarm_scope}_actual"] & (usable.probability >= threshold)
+    # Mirror weather_api.notify_rain_state_change(): a signal must remain true
+    # for N consecutive available observations before it can create a user
+    # notification. Missing predictions and dry samples reset the streak.
+    streak = pd.Series(0, index=usable.index, dtype="int64")
+    for _, block in usable.groupby("block", sort=False):
+        signal = raw_alert.loc[block.index]
+        # The false row that precedes a true run shares the same cumulative
+        # group key, so use a cumulative sum of 0/1 values rather than
+        # cumcount (which would start the run at 2).
+        run = signal.astype(int).groupby((~signal).cumsum()).cumsum()
+        streak.loc[block.index] = run.astype(int)
+    usable["alert"] = raw_alert & streak.ge(int(confirm_streak))
     cooldown = pd.Timedelta(minutes=cooldown_minutes)
     episode_rows, alert_to_episode = [], {}
     for _, block in usable.groupby("block", sort=False):
@@ -178,6 +211,8 @@ def evaluate_events(history, predictions, horizon, threshold, dry_minutes=60,
     leads = [row["lead_minutes"] for row in event_rows if row["detected"]]
     summary = {
         "horizon_minutes": horizon, "threshold": float(threshold), "alarm_scope": alarm_scope,
+        "target_kind": target_kind,
+        "confirm_streak": int(confirm_streak),
         "dry_minutes_before_onset": dry_minutes, "episode_cooldown_minutes": cooldown_minutes,
         "input_forecast_rows": len(saved), "usable_forecast_rows": len(usable),
         "excluded_forecast_rows": int((~valid).sum()),
@@ -208,10 +243,13 @@ def main(argv=None):
     parser.add_argument("--dry-minutes", type=int, default=60)
     parser.add_argument("--cooldown-minutes", type=float, default=30)
     parser.add_argument("--alarm-scope", choices=["dry_now", "dry_60m", "both"], default="both")
+    parser.add_argument("--confirm-streak", type=int, default=3,
+                        help="Consecutive model signals required before counting a notification")
     args = parser.parse_args(argv)
     bundle = Path(args.bundle_dir)
     evaluation = json.loads((bundle / "evaluation.json").read_text(encoding="utf-8"))
     kind = evaluation["model_kind"]
+    target_kind = evaluation.get("target_kind", "rain_onset" if kind in {"rf_onset", "extra_trees_onset"} else "rain_window")
     history, _, _ = load_features(args.data_dir)
     outputs, results = [], []
     scopes = ["dry_now", "dry_60m"] if args.alarm_scope == "both" else [args.alarm_scope]
@@ -221,7 +259,8 @@ def main(argv=None):
         for scope in scopes:
             summary, events, episodes = evaluate_events(
                 history, predictions, horizon, result[f"{kind}_best_threshold"],
-                args.dry_minutes, args.cooldown_minutes, scope)
+                args.dry_minutes, args.cooldown_minutes, scope, target_kind,
+                args.confirm_streak)
             results.append(summary)
             outputs.extend([(f"events_{horizon}m_{scope}.csv", events),
                             (f"episodes_{horizon}m_{scope}.csv", episodes)])

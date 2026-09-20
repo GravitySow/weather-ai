@@ -46,6 +46,10 @@ _last_nwp_log_hour = None
 # filters out that kind of one-off blip at the cost of a ~N-minute delay on
 # genuine alerts.
 RAIN_ALERT_CONFIRM_STREAK = int(os.getenv("RAIN_ALERT_CONFIRM_STREAK", "3"))
+# Require agreement from multiple forecast horizons before a model alert is
+# eligible for notification.  A single horizon can spike on local sensor noise;
+# this gate is applied to the notification path, not to the stored probabilities.
+RAIN_ALERT_MIN_HORIZON_SIGNALS = max(1, int(os.getenv("RAIN_ALERT_MIN_HORIZON_SIGNALS", "2")))
 
 # A rain sensor can report a dry minute between drops.  Keep the last
 # confirmed rain state until this many consecutive source polls are dry, so a
@@ -288,6 +292,27 @@ def notify_rain_state_change(prediction):
     raw_any_rain_alert = bool(prediction["any_rain_alert"])
     next_horizon = prediction["next_rain_alert_horizon"]
 
+    horizon_predictions = prediction.get("predictions") or {}
+    horizon_signals = [bool(item.get("rain_alert")) for item in horizon_predictions.values()]
+    required_signals = min(RAIN_ALERT_MIN_HORIZON_SIGNALS, len(horizon_signals)) if horizon_signals else 1
+    signal_count = sum(horizon_signals)
+    horizon_consensus = signal_count >= required_signals if horizon_signals else raw_any_rain_alert
+    prediction["horizon_signal_count"] = signal_count
+    prediction["horizon_signals_required"] = required_signals
+    prediction["horizon_consensus"] = bool(horizon_consensus)
+    if raw_any_rain_alert and not horizon_consensus:
+        # Keep per-horizon probabilities/model signals for diagnosis, but make
+        # the user-facing alert state match the policy that gates Telegram and
+        # HA publication.  This prevents a lone 30m spike from becoming a push.
+        for item in horizon_predictions.values():
+            if item.get("rain_alert"):
+                item["rain_alert"] = False
+                item["suppressed_by_horizon_consensus"] = True
+        prediction["any_rain_alert"] = False
+        prediction["next_rain_alert_horizon"] = None
+        prediction["alert_message"] = "No rain alert"
+        next_horizon = None
+
     try:
         previous = weather_db.get_alert_state()
     except Exception:
@@ -314,7 +339,7 @@ def notify_rain_state_change(prediction):
         observed_raining
         or (previous_raining and dry_streak < RAIN_STOP_CONFIRM_STREAK)
     )
-    any_rain_alert = raw_any_rain_alert and not is_raining_now
+    any_rain_alert = raw_any_rain_alert and horizon_consensus and not is_raining_now
 
     radar = prediction.get("radar") or {}
     radar_signal = bool(

@@ -35,7 +35,15 @@ def _repair_short_gaps(df):
     are filled; longer gaps still become a new segment and are never filled.
     """
     frame = df.reset_index(drop=True).copy()
-    frame["observation_gap_filled"] = 0.0
+    # Preserve provenance supplied by an upstream importer.  Live gap repair
+    # adds its own markers below; resetting this column would make an already
+    # synthetic row look like ground truth during offline training.
+    if "observation_gap_filled" not in frame:
+        frame["observation_gap_filled"] = 0.0
+    else:
+        frame["observation_gap_filled"] = pd.to_numeric(
+            frame["observation_gap_filled"], errors="coerce"
+        ).fillna(0.0)
     if len(frame) < 2:
         return frame
 
@@ -95,7 +103,10 @@ def _repair_short_gaps(df):
                 if column in frame.columns:
                     left_value = pd.to_numeric(previous[column], errors="coerce")
                     right_value = pd.to_numeric(following[column], errors="coerce")
-                    inserted[column] = np.nanmax([left_value, right_value])
+                    if pd.isna(left_value) and pd.isna(right_value):
+                        inserted[column] = np.nan
+                    else:
+                        inserted[column] = np.nanmax([left_value, right_value])
             if "rain" in frame.columns:
                 inserted["rain"] = bool(previous["rain"]) or bool(following["rain"])
             inserted["observation_gap_filled"] = 1.0
