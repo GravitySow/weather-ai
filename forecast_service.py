@@ -74,7 +74,7 @@ def _arrival_from_prediction(prediction):
     }
 
 
-def get_forecast(model_kind="rf"):
+def get_forecast(model_kind=None):
     """Returns the unified forecast object:
 
       {
@@ -99,6 +99,12 @@ def get_forecast(model_kind="rf"):
     source can provide a forecast.  The hourly/daily/arrival sections degrade
     independently and retain a reason for each unavailable source.
     """
+    # Callers such as Telegram use the no-argument form.  Resolve that form
+    # from the same configured model used by the API instead of silently
+    # falling back to the legacy ``rf`` bundle (which can have a different
+    # feature contract from ``rf_onset``).
+    model_kind = model_kind or predict_weather_ai.MODEL_KIND
+
     prediction = None
     local_error = None
     try:

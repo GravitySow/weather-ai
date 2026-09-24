@@ -167,7 +167,7 @@ python migrate_csv_to_db.py --data-dir /data/dataset
 
 - `GET /health`
 - `GET /predict`
-- `GET /predict?model=rf`
+- `GET /predict?model=rf` (or `rf_onset` for the default onset bundle)
 - `GET /forecast` — unified nowcast, radar arrival diagnostic, and hourly/daily NWP forecast
 - `GET /official-warnings` — active TMD CAP warnings matched to `WEATHER_LAT/WEATHER_LON`
 - `GET /rain-stop` — history-based experimental rain-stop estimate
