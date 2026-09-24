@@ -643,8 +643,8 @@ def ha_source_status():
 @app.get("/predict")
 def predict_latest(model: str | None = None):
     model_kind = model or MODEL_KIND
-    if model_kind not in ["xgb", "rf", "extra_trees"]:
-        raise HTTPException(status_code=400, detail='model must be "xgb", "rf" or "extra_trees"')
+    if model_kind not in ["xgb", "rf", "rf_onset", "extra_trees"]:
+        raise HTTPException(status_code=400, detail='model must be "xgb", "rf", "rf_onset" or "extra_trees"')
 
     try:
         return predict(model_kind=model_kind)
@@ -656,8 +656,8 @@ def predict_latest(model: str | None = None):
 def unified_forecast(model: str | None = None):
     """Return the user-facing nowcast → NWP forecast assembled in one place."""
     model_kind = model or MODEL_KIND
-    if model_kind not in ["xgb", "rf", "extra_trees"]:
-        raise HTTPException(status_code=400, detail='model must be "xgb", "rf" or "extra_trees"')
+    if model_kind not in ["xgb", "rf", "rf_onset", "extra_trees"]:
+        raise HTTPException(status_code=400, detail='model must be "xgb", "rf", "rf_onset" or "extra_trees"')
     result = forecast_service.get_forecast(model_kind=model_kind)
     if result is None:
         raise HTTPException(status_code=503, detail="forecast is not ready; need continuous sensor history")
