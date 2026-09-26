@@ -281,7 +281,14 @@ def _light(state: dict[str, Any]) -> float | str | None:
 
 
 def _state_age(state: dict[str, Any], now: datetime) -> tuple[datetime | None, float | None]:
-    observed = _parse_timestamp(state.get("last_updated") or state.get("last_changed"))
+    # Home Assistant advances last_reported for every state report, including
+    # unchanged sensor values. last_updated only advances when the value or
+    # attributes change and can falsely mark a healthy steady sensor stale.
+    observed = (
+        _parse_timestamp(state.get("last_reported"))
+        or _parse_timestamp(state.get("last_updated"))
+        or _parse_timestamp(state.get("last_changed"))
+    )
     if observed is None:
         return None, None
     return observed, max(0.0, (now - observed).total_seconds())
