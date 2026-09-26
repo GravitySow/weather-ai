@@ -21,6 +21,11 @@ SHORT_GAP_MAX_SECONDS = 630.0
 # keep the same feature segment; only very short intervals (likely a true
 # duplicate/out-of-order sample) restart the row-based history.
 MIN_VALID_INTERVAL_SECONDS = 20.0
+# HA can return a second state snapshot a few seconds after the poll that
+# produced the previous row. Treat that tiny burst as one observation and keep
+# the latest value; otherwise it creates a new segment and destroys the live
+# 120-minute feature window.
+DUPLICATE_BURST_MAX_SECONDS = 5.0
 NOMINAL_SAMPLE_SECONDS = 60.0
 
 
@@ -48,6 +53,15 @@ def _repair_short_gaps(df):
         return frame
 
     timestamps = pd.to_datetime(frame["timestamp"], errors="coerce", utc=True, format="mixed")
+    burst_delta = timestamps.shift(-1).sub(timestamps).dt.total_seconds()
+    burst_keep = burst_delta.isna() | burst_delta.gt(DUPLICATE_BURST_MAX_SECONDS)
+    if not bool(burst_keep.all()):
+        # Keep the newest row from each tiny burst. Larger cadence gaps are
+        # left intact for the interpolation/segment logic below.
+        frame = frame.loc[burst_keep].reset_index(drop=True)
+        timestamps = pd.to_datetime(
+            frame["timestamp"], errors="coerce", utc=True, format="mixed"
+        )
     numeric_columns = [
         column for column in frame.select_dtypes(include=[np.number]).columns
         if column not in {"observation_gap_filled", "segment_id"}
