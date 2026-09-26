@@ -75,6 +75,14 @@ def _entity_valid(entity_id: str) -> bool:
 
 
 def _config() -> dict[str, Any]:
+    stale_after_seconds = _int_env("HA_STALE_AFTER_SECONDS", 180)
+    # Humidity sensors often repeat an unchanged saturated value less often
+    # than temperature/pressure sensors. Give that one input a bounded
+    # 10-minute window while keeping the other required inputs strict.
+    humidity_stale_after_seconds = max(
+        stale_after_seconds,
+        _int_env("HA_HUMIDITY_STALE_AFTER_SECONDS", 600),
+    )
     return {
         "enabled": _truthy(os.getenv("HA_SOURCE_ENABLED", "0")),
         "temp_entity": _entity("HA_TEMP_ENTITY"),
@@ -86,7 +94,8 @@ def _config() -> dict[str, Any]:
         "wind_gust_entity": _entity("HA_WIND_GUST_ENTITY"),
         "wind_direction_entity": _entity("HA_WIND_DIRECTION_ENTITY"),
         "poll_seconds": _int_env("HA_POLL_SECONDS", 60),
-        "stale_after_seconds": _int_env("HA_STALE_AFTER_SECONDS", 180),
+        "stale_after_seconds": stale_after_seconds,
+        "humidity_stale_after_seconds": humidity_stale_after_seconds,
         "api_base": (os.getenv("HA_API_BASE") or "http://supervisor/core/api").rstrip("/"),
         # HA_TOKEN is intended for an external Docker deployment. Add-ons get
         # SUPERVISOR_TOKEN from the Supervisor automatically.
@@ -361,7 +370,12 @@ def fetch_reading(now: datetime | None = None) -> dict[str, Any]:
                 reason = f"missing_timestamp_{key}"
                 _set_status(status="unavailable", reason=reason, last_error=reason, last_error_at_utc=_now_iso(), error_count=_status.get("error_count", 0) + 1)
                 return {"status": "unavailable", "reason": reason, "reading": None}
-            if age is None or age > config["stale_after_seconds"]:
+            stale_limit = (
+                config["humidity_stale_after_seconds"]
+                if key == "humidity"
+                else config["stale_after_seconds"]
+            )
+            if age is None or age > stale_limit:
                 reason = f"stale_{key}"
                 _set_status(status="stale", reason=reason, last_error=reason, last_error_at_utc=_now_iso(), error_count=_status.get("error_count", 0) + 1)
                 return {"status": "stale", "reason": reason, "reading": None}
@@ -535,6 +549,7 @@ def get_source_status() -> dict[str, Any]:
         "reason": current.get("reason") or reason,
         "poll_seconds": config["poll_seconds"],
         "stale_after_seconds": config["stale_after_seconds"],
+        "humidity_stale_after_seconds": config["humidity_stale_after_seconds"],
         "server_now_at_utc": server_now.isoformat().replace("+00:00", "Z"),
         "observation_age_seconds": observation_age,
         "api_base": _safe_api_base(config["api_base"]),
